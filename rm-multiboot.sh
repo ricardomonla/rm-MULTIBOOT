@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.3.0
+#  Versión:  2.3.1
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.3.0"
+readonly SCRIPT_VERSION="2.3.1"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -453,10 +453,17 @@ download_with_progress() {
 
     # Loop de progreso
     local done_b pct done_mb total_mb filled empty bar
+    local prev_bytes=0 speed_str="0.0"
     while kill -0 "$dl_pid" 2>/dev/null; do
         done_b=0
         [[ -f "$dest" ]] && done_b=$(stat -c%s "$dest" 2>/dev/null || echo 0)
         done_mb=$(( done_b / 1024 / 1024 ))
+
+        # Velocidad: bytes descargados en el último intervalo (0.3 s) → MB/s
+        local delta=$(( done_b - prev_bytes ))
+        [[ $delta -gt 0 ]] && \
+            speed_str=$(awk "BEGIN {printf \"%.1f\", $delta / 0.3 / 1048576}")
+        prev_bytes=$done_b
 
         if [[ "$total_bytes" -gt 0 ]]; then
             pct=$(( done_b * 100 / total_bytes ))
@@ -464,10 +471,10 @@ download_with_progress() {
             filled=$(( pct * 20 / 100 ))
             empty=$(( 20 - filled ))
             bar=$(printf '%0.s#' $(seq 1 "$filled"))$(printf '%0.s-' $(seq 1 "$empty"))
-            printf "\r  ${C}→${N}  [%-20s]  %3d%%  (%d MB de %d MB)" \
-                "$bar" "$pct" "$done_mb" "$total_mb"
+            printf "\r  ${C}→${N}  [%-20s]  %3d%%  (%d de %d MB)  %s MB/s  " \
+                "$bar" "$pct" "$done_mb" "$total_mb" "$speed_str"
         else
-            printf "\r  ${C}→${N}  %d MB descargados..." "$done_mb"
+            printf "\r  ${C}→${N}  %d MB  %s MB/s  " "$done_mb" "$speed_str"
         fi
         sleep 0.3
     done
@@ -477,7 +484,7 @@ download_with_progress() {
     if [[ $rc -eq 0 ]]; then
         local final_mb
         final_mb=$(( $(stat -c%s "$dest" 2>/dev/null || echo 0) / 1024 / 1024 ))
-        printf "\r  ${G}✓${N}  [####################]  100%%  (%d MB)                    \n" \
+        printf "\r  ${G}✓${N}  [####################]  100%%  (%d MB)                         \n" \
             "$final_mb"
     fi
     return $rc
