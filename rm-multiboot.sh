@@ -1,12 +1,29 @@
 #!/usr/bin/env bash
 # =============================================================================
-# multiboot.sh — Gestor de Multiboot desde disco interno
-# Proyecto: rm-MULTIBOOT  |  Uso: sudo ./multiboot.sh
+#  rm-multiboot.sh — Gestor de Multiboot desde disco interno
+# =============================================================================
+#  Autor:    Ricardo Monla
+#  Email:    ma_fp@yahoo.com.ar
+#  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
+#  Versión:  2.0.0
+#  Licencia: MIT
+#
+#  Uso: sudo ./rm-multiboot.sh
+#
+#  Descripción:
+#    Prepara una partición del disco interno para bootear ISOs de Linux
+#    directamente desde el menú GRUB, sin necesidad de pendrive.
+#    Las ISOs se pueden descargar desde el catálogo (isos.conf) o
+#    agregarse desde un archivo local.
 # =============================================================================
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_AUTHOR="Ricardo Monla"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
+
 readonly MULTIBOOT_LABEL="MULTIBOOT"
 readonly MULTIBOOT_MOUNT="/mnt/multiboot"
 readonly ISO_DIR="$MULTIBOOT_MOUNT/isos"
@@ -29,9 +46,9 @@ MULTIBOOT_DEV="" MULTIBOOT_SIZE="" MULTIBOOT_READY=false
 banner() {
     clear
     echo -e "${W}${B}"
-    echo "  ╔═══════════════════════════════════════════════════╗"
-    echo "  ║        MULTIBOOT MANAGER  ·  rm-MULTIBOOT         ║"
-    echo "  ╚═══════════════════════════════════════════════════╝"
+    echo "  ╔═══════════════════════════════════════════════════════╗"
+    echo "  ║   rm-multiboot  ·  v${SCRIPT_VERSION}  ·  ${SCRIPT_AUTHOR}   ║"
+    echo "  ╚═══════════════════════════════════════════════════════╝"
     echo -e "${N}"
 }
 
@@ -39,7 +56,7 @@ ok()      { echo -e "  ${G}✓${N}  $*"; }
 warn()    { echo -e "  ${Y}⚠${N}  $*"; }
 err()     { echo -e "  ${R}✗${N}  $*"; }
 step()    { echo -e "\n  ${W}${C}→${N}  ${W}$*${N}"; }
-divider() { echo -e "\n  ${B}──────────────────────────────────────────────────${N}\n"; }
+divider() { echo -e "\n  ${B}──────────────────────────────────────────────────────${N}\n"; }
 
 ask() {
     local prompt="$1" default="${2:-}" answer
@@ -62,11 +79,13 @@ pause() { echo ""; read -rp "  Presioná Enter para continuar..." _; }
 
 grub_update() {
     if command -v update-grub &>/dev/null; then
-        update-grub 2>/dev/null && ok "GRUB actualizado" || warn "No se pudo actualizar GRUB"
+        update-grub 2>/dev/null && ok "GRUB actualizado" \
+            || warn "No se pudo actualizar GRUB automáticamente"
     elif command -v grub-mkconfig &>/dev/null; then
-        grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null && ok "GRUB actualizado" || warn "No se pudo actualizar GRUB"
+        grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null && ok "GRUB actualizado" \
+            || warn "No se pudo actualizar GRUB automáticamente"
     else
-        warn "No se encontró update-grub ni grub-mkconfig — actualizá el GRUB manualmente"
+        warn "No se encontró update-grub — actualizá el GRUB manualmente"
     fi
 }
 
@@ -79,26 +98,22 @@ detect_system() {
     step "Detectando sistema..."
     echo ""
 
-    # Modo boot
     [[ -d /sys/firmware/efi ]] && BOOT_MODE="UEFI" || BOOT_MODE="BIOS Legacy"
     ok "Modo de arranque: ${W}$BOOT_MODE${N}"
 
-    # OS actual
-    [[ -f /etc/os-release ]] && { . /etc/os-release; OS_NAME="${PRETTY_NAME:-Linux}"; } || OS_NAME="Linux"
+    [[ -f /etc/os-release ]] && { . /etc/os-release; OS_NAME="${PRETTY_NAME:-Linux}"; } \
+        || OS_NAME="Linux"
     ok "Sistema operativo: ${W}$OS_NAME${N}"
 
-    # Disco raíz
     local root_src root_name
     root_src=$(findmnt -n -o SOURCE / 2>/dev/null | head -1)
     root_name=$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)
-    if [[ -z "$root_name" ]]; then
+    [[ -z "$root_name" ]] && \
         root_name=$(echo "$root_src" | sed 's|/dev/||;s|p\?[0-9]*$||')
-    fi
     ROOT_DISK_DEV="/dev/$root_name"
     ROOT_DISK_SIZE=$(lsblk -dno SIZE "$ROOT_DISK_DEV" 2>/dev/null || echo "?")
     ok "Disco principal: ${W}$ROOT_DISK_DEV${N} ($ROOT_DISK_SIZE)"
 
-    # ¿Ya existe partición MULTIBOOT?
     local mb_name
     mb_name=$(lsblk -o NAME,LABEL -rn 2>/dev/null \
               | awk -v lbl="$MULTIBOOT_LABEL" '$2==lbl {print $1}' | head -1)
@@ -138,7 +153,8 @@ menu_principal() {
         mount_multiboot
         local iso_count
         iso_count=$(find "$ISO_DIR" -maxdepth 2 -name "*.iso" 2>/dev/null | wc -l)
-        [[ "$iso_count" -gt 0 ]] && show_iso_mini_list || echo -e "  ${Y}Todavía no hay ISOs cargadas.${N}\n"
+        [[ "$iso_count" -gt 0 ]] && show_iso_mini_list \
+            || echo -e "  ${Y}Todavía no hay ISOs cargadas.${N}\n"
         echo "    1)  Agregar una ISO"
         echo "    2)  Ver ISOs disponibles"
         echo "    3)  Eliminar una ISO"
@@ -146,7 +162,7 @@ menu_principal() {
         echo ""
         local opt; opt=$(ask "Opción [1-4]")
         case "$opt" in
-            1) add_iso ;;
+            1) menu_agregar_iso ;;
             2) list_isos; pause; banner; detect_system; menu_principal ;;
             3) remove_iso ;;
             4) echo ""; exit 0 ;;
@@ -161,9 +177,32 @@ show_iso_mini_list() {
     echo -e "  ISOs disponibles: ${W}$count${N}\n"
     find "$ISO_DIR" -maxdepth 2 -name "*.iso" 2>/dev/null | sort | while read -r iso; do
         local sz; sz=$(du -h "$iso" | cut -f1)
-        printf "    ${C}•${N} %-50s %s\n" "$(basename "$iso")" "($sz)"
+        printf "    ${C}•${N} %-52s %s\n" "$(basename "$iso")" "($sz)"
     done
     echo ""
+}
+
+
+# =============================================================================
+# MENÚ — CÓMO AGREGAR ISO
+# =============================================================================
+
+menu_agregar_iso() {
+    banner
+    step "Agregar una ISO"
+    echo ""
+    echo -e "  ¿De dónde obtenés la ISO?\n"
+    echo "    1)  Descargar desde el catálogo  (isos.conf)"
+    echo "    2)  Usar un archivo local        (ruta en este equipo)"
+    echo "    3)  Volver"
+    echo ""
+    local opt; opt=$(ask "Opción [1-3]")
+    case "$opt" in
+        1) download_from_catalog ;;
+        2) add_iso_local ;;
+        3) banner; detect_system; menu_principal ;;
+        *) menu_agregar_iso ;;
+    esac
 }
 
 
@@ -176,28 +215,25 @@ setup_wizard() {
     step "Asistente de configuración inicial"
     echo ""
 
-    # ── Detectar espacios libres ──────────────────────────────────────────────
     local free_raw
     free_raw=$(parted -s "$ROOT_DISK_DEV" unit MiB print free 2>/dev/null \
                | awk '/Free Space/ && $3+0 >= 10240 {print $1, $2, $3}')
 
     if [[ -z "$free_raw" ]]; then
         err "No se encontró espacio libre ≥ 10 GB sin asignar en $ROOT_DISK_DEV"
-        echo ""
-        echo -e "  Para continuar necesitás liberar espacio con GParted u otra herramienta.\n"
+        echo -e "\n  Para continuar necesitás liberar espacio con GParted u otra herramienta.\n"
         pause; exit 1
     fi
 
-    # ── Mostrar regiones disponibles ─────────────────────────────────────────
     echo -e "  Espacio libre sin asignar en ${W}$ROOT_DISK_DEV${N}:\n"
-    local -a starts ends sizes labels
+    local -a starts ends sizes
     local i=1
     while read -r start end size; do
         local size_gib
         size_gib=$(echo "$size" | sed 's/MiB//' | awk '{printf "%.0f", $1/1024}')
         starts+=("$start"); ends+=("$end"); sizes+=("$size_gib")
-        labels+=("${size_gib} GB libres (desde $start hasta $end)")
-        printf "    ${C}%d)${N}  %s\n" "$i" "${labels[$((i-1))]}"
+        printf "    ${C}%d)${N}  %s GB libres  (desde %s hasta %s)\n" \
+            "$i" "$size_gib" "$start" "$end"
         i=$((i+1))
     done <<< "$free_raw"
     echo ""
@@ -216,38 +252,34 @@ setup_wizard() {
     local max_gib="${sizes[$idx]}"
     local recommended=$((max_gib > 100 ? 50 : max_gib))
 
-    # ── Pedir tamaño ─────────────────────────────────────────────────────────
     echo -e "  ${Y}Nota:${N} cada ISO pesa entre 600 MB y 5 GB."
     echo -e "  Recomendado: ≥ 30 GB para tener varias ISOs.\n"
     local size_gb
     size_gb=$(ask "¿Cuántos GB asignar a MULTIBOOT? (máx $max_gib)" "$recommended")
 
-    if ! [[ "$size_gb" =~ ^[0-9]+$ ]] || [[ "$size_gb" -lt 10 ]] || [[ "$size_gb" -gt "$max_gib" ]]; then
-        err "Tamaño inválido. Debe ser un número entre 10 y $max_gib."
-        pause; setup_wizard; return
+    if ! [[ "$size_gb" =~ ^[0-9]+$ ]] || \
+       [[ "$size_gb" -lt 10 ]] || [[ "$size_gb" -gt "$max_gib" ]]; then
+        err "Tamaño inválido. Debe ser un número entre 10 y $max_gib."; pause
+        setup_wizard; return
     fi
 
-    # ── Calcular extremo de la nueva partición ────────────────────────────────
     local start_mib end_mib
     start_mib=$(echo "$free_start" | sed 's/MiB//')
     end_mib=$((start_mib + size_gb * 1024))
 
-    # ── Confirmar ─────────────────────────────────────────────────────────────
     echo ""
     echo -e "  ${W}Resumen:${N}"
     echo -e "    Disco:          $ROOT_DISK_DEV"
-    echo -e "    Inicio:         ${start_mib} MiB"
     echo -e "    Tamaño:         ${size_gb} GB"
     echo -e "    Etiqueta:       $MULTIBOOT_LABEL"
-    echo -e "    Sistema arch:  ext4"
-    echo -e "    Punto montaje: $MULTIBOOT_MOUNT"
+    echo -e "    Sistema de arch: ext4"
+    echo -e "    Punto de montaje: $MULTIBOOT_MOUNT"
     echo ""
 
     if ! confirm "¿Crear la partición ahora?"; then
         echo ""; warn "Operación cancelada."; pause; exit 0
     fi
 
-    # ── Crear partición ───────────────────────────────────────────────────────
     echo ""
     step "Creando partición..."
 
@@ -255,9 +287,9 @@ setup_wizard() {
     parts_before=$(lsblk -lno NAME "$ROOT_DISK_DEV" \
                    | grep -v "^$(basename "$ROOT_DISK_DEV")$" | sort)
 
-    # Tabla GPT: mkpart sin nombre de tipo; MBR: mkpart primary
     local part_table
-    part_table=$(parted -s "$ROOT_DISK_DEV" print 2>/dev/null | awk '/Partition Table/{print $3}')
+    part_table=$(parted -s "$ROOT_DISK_DEV" print 2>/dev/null \
+                 | awk '/Partition Table/{print $3}')
 
     if [[ "$part_table" == "gpt" ]]; then
         parted -s "$ROOT_DISK_DEV" mkpart "$MULTIBOOT_LABEL" ext4 \
@@ -267,14 +299,13 @@ setup_wizard() {
             "${start_mib}MiB" "${end_mib}MiB" 2>/dev/null
     fi
 
-    sleep 1
-    partprobe "$ROOT_DISK_DEV" 2>/dev/null || true
-    sleep 1
+    sleep 1; partprobe "$ROOT_DISK_DEV" 2>/dev/null || true; sleep 1
 
     local new_part
     new_part=$(comm -13 \
         <(echo "$parts_before") \
-        <(lsblk -lno NAME "$ROOT_DISK_DEV" | grep -v "^$(basename "$ROOT_DISK_DEV")$" | sort) \
+        <(lsblk -lno NAME "$ROOT_DISK_DEV" \
+          | grep -v "^$(basename "$ROOT_DISK_DEV")$" | sort) \
         | head -1)
 
     if [[ -z "$new_part" ]]; then
@@ -284,30 +315,25 @@ setup_wizard() {
     MULTIBOOT_DEV="/dev/$new_part"
     ok "Partición creada: $MULTIBOOT_DEV"
 
-    # ── Formatear ─────────────────────────────────────────────────────────────
     step "Formateando como ext4..."
     mkfs.ext4 -L "$MULTIBOOT_LABEL" -q "$MULTIBOOT_DEV"
     ok "Formato aplicado con etiqueta '$MULTIBOOT_LABEL'"
 
-    # ── Montar ────────────────────────────────────────────────────────────────
     mkdir -p "$MULTIBOOT_MOUNT"
     mount "$MULTIBOOT_DEV" "$MULTIBOOT_MOUNT"
     mkdir -p "$ISO_DIR" "$MULTIBOOT_MOUNT/grub/entries"
     ok "Montada en $MULTIBOOT_MOUNT"
 
-    # ── fstab ─────────────────────────────────────────────────────────────────
     local part_uuid
     part_uuid=$(lsblk -no UUID "$MULTIBOOT_DEV" | head -1)
     if ! grep -q "$part_uuid" /etc/fstab 2>/dev/null; then
         printf '\n# Partición MULTIBOOT — rm-MULTIBOOT\nUUID=%s  %s  ext4  defaults,noatime  0  2\n' \
             "$part_uuid" "$MULTIBOOT_MOUNT" >> /etc/fstab
-        ok "Agregado a /etc/fstab (montaje automático en cada inicio)"
+        ok "Agregado a /etc/fstab (montaje automático)"
     fi
 
-    # ── Hook de GRUB ──────────────────────────────────────────────────────────
     install_grub_hook "$part_uuid"
 
-    # ── Actualizar GRUB ───────────────────────────────────────────────────────
     step "Actualizando GRUB..."
     grub_update
 
@@ -323,14 +349,14 @@ setup_wizard() {
 
 
 # =============================================================================
-# HOOK DE GRUB
+# GRUB — HOOK
 # =============================================================================
 
 install_grub_hook() {
     local part_uuid="$1"
     cat > "$GRUB_HOOK" <<HOOK
 #!/bin/sh
-# rm-MULTIBOOT — entradas generadas automáticamente por multiboot.sh
+# rm-MULTIBOOT — entradas generadas automáticamente por rm-multiboot.sh
 MPOINT="$MULTIBOOT_MOUNT"
 ENTRIES="$ENTRIES_DIR"
 
@@ -364,14 +390,144 @@ mount_multiboot() {
 
 
 # =============================================================================
-# AGREGAR ISO
+# DESCARGAR DESDE CATÁLOGO (isos.conf)
 # =============================================================================
 
-add_iso() {
+download_from_catalog() {
     banner
-    step "Agregar una ISO al multiboot"
+    step "Descargar ISO desde el catálogo"
     echo ""
-    echo -e "  Ingresá la ruta al archivo .iso"
+
+    if [[ ! -f "$ISOS_CONF" ]]; then
+        err "No se encontró el archivo de catálogo: $ISOS_CONF"
+        echo -e "  Creá o copiá el archivo ${W}isos.conf${N} junto a este script.\n"
+        pause; banner; detect_system; menu_principal; return
+    fi
+
+    # Leer entradas válidas del catálogo (ignorar comentarios y líneas vacías)
+    local -a names urls
+    while IFS='|' read -r name url; do
+        # Ignorar comentarios y vacías
+        [[ "$name" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${name// }" ]]           && continue
+        name="${name#"${name%%[! ]*}"}"; name="${name%"${name##*[! ]}"}"
+        url="${url#"${url%%[! ]*}"}";    url="${url%"${url##*[! ]}"}"
+        [[ -z "$url" ]] && continue
+        names+=("$name")
+        urls+=("$url")
+    done < "$ISOS_CONF"
+
+    if [[ "${#names[@]}" -eq 0 ]]; then
+        err "El catálogo está vacío o no tiene entradas válidas."
+        echo -e "  Revisá el archivo ${W}isos.conf${N}.\n"
+        pause; banner; detect_system; menu_principal; return
+    fi
+
+    # Mostrar catálogo
+    echo -e "  ${W}Catálogo disponible:${N}\n"
+    local i=1
+    for name in "${names[@]}"; do
+        local iso_filename
+        iso_filename=$(basename "${urls[$((i-1))]%%\?*}")
+        local estado=""
+        [[ -f "$ISO_DIR/$iso_filename" ]] && estado=" ${G}[ya descargada]${N}"
+        printf "  ${C}%2d)${N}  %-42s%b\n" "$i" "$name" "$estado"
+        i=$((i+1))
+    done
+    echo "   0)  Volver"
+    echo ""
+
+    local opt
+    opt=$(ask "¿Cuál descargamos? [0-${#names[@]}]")
+
+    if [[ "$opt" == "0" ]]; then
+        banner; detect_system; menu_principal; return
+    fi
+
+    if ! [[ "$opt" =~ ^[0-9]+$ ]] || \
+       [[ "$opt" -lt 1 ]] || [[ "$opt" -gt "${#names[@]}" ]]; then
+        err "Opción inválida."; pause; download_from_catalog; return
+    fi
+
+    local idx=$((opt - 1))
+    local chosen_name="${names[$idx]}"
+    local chosen_url="${urls[$idx]}"
+    local iso_filename
+    iso_filename=$(basename "${chosen_url%%\?*}")
+    local dest="$ISO_DIR/$iso_filename"
+
+    echo ""
+    echo -e "  ${W}ISO seleccionada:${N}"
+    ok "Nombre:  ${W}$chosen_name${N}"
+    ok "Archivo: $iso_filename"
+    ok "URL:     ${C}$chosen_url${N}"
+    echo ""
+
+    # Verificar si ya existe
+    if [[ -f "$dest" ]]; then
+        warn "Esta ISO ya está descargada en la partición MULTIBOOT."
+        if ! confirm "¿Descargar de nuevo y sobreescribir?"; then
+            banner; detect_system; menu_principal; return
+        fi
+    fi
+
+    # Verificar espacio (estimamos con el tamaño del Content-Length del servidor)
+    local avail_k
+    avail_k=$(df "$MULTIBOOT_MOUNT" --output=avail | tail -1)
+    echo -e "  Espacio libre en MULTIBOOT: $(( avail_k / 1024 / 1024 )) GB\n"
+
+    if ! confirm "¿Iniciar descarga?"; then
+        banner; detect_system; menu_principal; return
+    fi
+
+    # Descargar
+    echo ""
+    step "Descargando $iso_filename..."
+    echo ""
+
+    if command -v wget &>/dev/null; then
+        wget --show-progress -q -c -O "$dest" "$chosen_url" \
+            || { err "Falló la descarga."; rm -f "$dest"; pause
+                 banner; detect_system; menu_principal; return; }
+    elif command -v curl &>/dev/null; then
+        curl -L -C - --progress-bar -o "$dest" "$chosen_url" \
+            || { err "Falló la descarga."; rm -f "$dest"; pause
+                 banner; detect_system; menu_principal; return; }
+    else
+        err "No se encontró wget ni curl. Instalá uno de los dos e intentá de nuevo."
+        pause; banner; detect_system; menu_principal; return
+    fi
+
+    echo ""
+    ok "Descarga completada: $iso_filename"
+
+    # Generar entrada GRUB
+    step "Generando entrada de arranque..."
+    local distro
+    distro=$(detect_distro "$iso_filename")
+    # Preferir el nombre del catálogo si es más descriptivo
+    [[ "$distro" == "Linux" ]] && distro="$chosen_name"
+    generate_grub_entry "$iso_filename" "$distro"
+
+    step "Actualizando menú de arranque..."
+    grub_update
+
+    divider
+    echo -e "  ${W}${G}¡ISO lista!${N}"
+    echo -e "  Al reiniciar aparecerá en el menú GRUB.\n"
+    pause; banner; detect_system; menu_principal
+}
+
+
+# =============================================================================
+# AGREGAR ISO DESDE RUTA LOCAL
+# =============================================================================
+
+add_iso_local() {
+    banner
+    step "Agregar ISO desde archivo local"
+    echo ""
+    echo -e "  Ingresá la ruta completa al archivo .iso"
     echo -e "  ${Y}Tip:${N} podés arrastrar el archivo directamente a la terminal\n"
 
     local iso_path
@@ -393,10 +549,9 @@ add_iso() {
     echo -e "  ${W}ISO detectada:${N}"
     ok "Nombre: ${W}$iso_name${N}"
     ok "Tamaño: $size"
-    ok "Distro:  ${W}$distro${N}"
+    ok "Distro: ${W}$distro${N}"
     echo ""
 
-    # Verificar espacio disponible
     local avail_k iso_k
     avail_k=$(df "$MULTIBOOT_MOUNT" --output=avail | tail -1)
     iso_k=$(du -k "$iso_path" | cut -f1)
@@ -407,7 +562,6 @@ add_iso() {
         pause; banner; detect_system; menu_principal; return
     fi
 
-    # Verificar si ya existe
     if [[ -f "$ISO_DIR/$iso_name" ]]; then
         warn "Ya existe una ISO con ese nombre."
         if ! confirm "¿Sobreescribir?"; then
@@ -419,38 +573,34 @@ add_iso() {
         banner; detect_system; menu_principal; return
     fi
 
-    # Copiar con progreso
     echo ""
     step "Copiando ISO..."
-    local total
+    local total dest
     total=$(stat -c%s "$iso_path")
-    local dest="$ISO_DIR/$iso_name"
+    dest="$ISO_DIR/$iso_name"
 
     cp "$iso_path" "$dest" &
     local cp_pid=$!
     while kill -0 "$cp_pid" 2>/dev/null; do
-        local done_bytes=0
-        [[ -f "$dest" ]] && done_bytes=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-        local pct=$(( total > 0 ? done_bytes * 100 / total : 0 ))
-        local done_mb=$(( done_bytes / 1024 / 1024 ))
-        local total_mb=$(( total / 1024 / 1024 ))
-        printf "\r  ${C}→${N}  %3d%%  (%d MB de %d MB)" "$pct" "$done_mb" "$total_mb"
+        local done_b=0
+        [[ -f "$dest" ]] && done_b=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+        local pct=$(( total > 0 ? done_b * 100 / total : 0 ))
+        printf "\r  ${C}→${N}  %3d%%  (%d MB de %d MB)" \
+            "$pct" "$(( done_b / 1024 / 1024 ))" "$(( total / 1024 / 1024 ))"
         sleep 0.4
     done
     wait "$cp_pid"
-    printf "\r  ${G}✓${N}  100%%  (%d MB)                              \n" "$(( total / 1024 / 1024 ))"
+    printf "\r  ${G}✓${N}  100%%  (%d MB)                              \n" \
+        "$(( total / 1024 / 1024 ))"
 
-    # Generar entrada GRUB
     step "Generando entrada de arranque..."
     generate_grub_entry "$iso_name" "$distro"
 
-    # Actualizar GRUB
     step "Actualizando menú de arranque..."
     grub_update
 
     divider
-    echo -e "  ${W}${G}¡ISO agregada!${N}"
-    echo -e "  Al reiniciar, aparecerá en el menú de arranque.\n"
+    echo -e "  ${W}${G}¡ISO agregada!${N} Al reiniciar aparecerá en el menú GRUB.\n"
     pause; banner; detect_system; menu_principal
 }
 
@@ -462,28 +612,28 @@ add_iso() {
 detect_distro() {
     local n="${1,,}"
     case "$n" in
-        *kubuntu*)         echo "Kubuntu" ;;
-        *xubuntu*)         echo "Xubuntu" ;;
-        *lubuntu*)         echo "Lubuntu" ;;
-        *ubuntu*)          echo "Ubuntu"  ;;
-        *linuxmint*|*mint*) echo "Linux Mint" ;;
-        *debian*)          echo "Debian"  ;;
-        *fedora*)          echo "Fedora"  ;;
-        *arch*)            echo "Arch Linux" ;;
-        *manjaro*)         echo "Manjaro" ;;
-        *kali*)            echo "Kali Linux" ;;
-        *parrot*)          echo "Parrot OS" ;;
-        *opensuse*)        echo "openSUSE" ;;
-        *pop*|*popos*)     echo "Pop!_OS" ;;
-        *elementary*)      echo "elementary OS" ;;
-        *zorin*)           echo "Zorin OS" ;;
-        *mxlinux*|*mx-*)   echo "MX Linux" ;;
-        *tails*)           echo "Tails" ;;
-        *alpine*)          echo "Alpine Linux" ;;
-        *rockylinux*|*rocky*) echo "Rocky Linux" ;;
-        *almalinux*|*alma*)   echo "AlmaLinux" ;;
-        *centosstream*|*centos*) echo "CentOS" ;;
-        *)                 echo "Linux" ;;
+        *kubuntu*)              echo "Kubuntu" ;;
+        *xubuntu*)              echo "Xubuntu" ;;
+        *lubuntu*)              echo "Lubuntu" ;;
+        *ubuntu*)               echo "Ubuntu" ;;
+        *linuxmint*|*mint*)     echo "Linux Mint" ;;
+        *debian*)               echo "Debian" ;;
+        *fedora*)               echo "Fedora" ;;
+        *arch*)                 echo "Arch Linux" ;;
+        *manjaro*)              echo "Manjaro" ;;
+        *kali*)                 echo "Kali Linux" ;;
+        *parrot*)               echo "Parrot OS" ;;
+        *opensuse*)             echo "openSUSE" ;;
+        *pop*|*popos*)          echo "Pop!_OS" ;;
+        *elementary*)           echo "elementary OS" ;;
+        *zorin*)                echo "Zorin OS" ;;
+        *mxlinux*|*mx-*)        echo "MX Linux" ;;
+        *tails*)                echo "Tails" ;;
+        *alpine*)               echo "Alpine Linux" ;;
+        *rockylinux*|*rocky*)   echo "Rocky Linux" ;;
+        *almalinux*|*alma*)     echo "AlmaLinux" ;;
+        *centos*)               echo "CentOS" ;;
+        *)                      echo "Linux" ;;
     esac
 }
 
@@ -499,19 +649,17 @@ generate_grub_entry() {
     part_uuid=$(lsblk -no UUID "$MULTIBOOT_DEV" 2>/dev/null | head -1)
     local entry_file="$ENTRIES_DIR/${label}.cfg"
 
-    # ── Verificar si la ISO tiene loopback.cfg nativo ─────────────────────────
+    # Verificar si la ISO tiene loopback.cfg nativo
     local tmp_mnt has_loopback=false
     tmp_mnt=$(mktemp -d)
-    if modprobe loop 2>/dev/null; then
-        if mount -o loop,ro "$ISO_DIR/$iso_name" "$tmp_mnt" 2>/dev/null; then
-            [[ -f "$tmp_mnt/boot/grub/loopback.cfg" ]] && has_loopback=true
-            umount "$tmp_mnt" 2>/dev/null || true
-        fi
+    modprobe loop 2>/dev/null || true
+    if mount -o loop,ro "$ISO_DIR/$iso_name" "$tmp_mnt" 2>/dev/null; then
+        [[ -f "$tmp_mnt/boot/grub/loopback.cfg" ]] && has_loopback=true
+        umount "$tmp_mnt" 2>/dev/null || true
     fi
     rmdir "$tmp_mnt" 2>/dev/null || true
 
     if [[ "$has_loopback" == true ]]; then
-        # Usar loopback.cfg nativo de la ISO (máxima compatibilidad)
         cat > "$entry_file" <<CFG
 menuentry "$distro — $iso_name" --class linux {
     insmod part_gpt
@@ -526,11 +674,10 @@ menuentry "$distro — $iso_name" --class linux {
     configfile (loop)/boot/grub/loopback.cfg
 }
 CFG
-        ok "Entrada GRUB: usando loopback.cfg nativo de la ISO"
+        ok "Entrada GRUB: loopback.cfg nativo"
     else
-        # Entrada por parámetros según familia de distro
         generate_grub_entry_fallback "$iso_name" "$distro" "$part_uuid" "$entry_file"
-        warn "Entrada GRUB: modo genérico (la ISO no tiene loopback.cfg)"
+        warn "Entrada GRUB: modo genérico (sin loopback.cfg en la ISO)"
     fi
     ok "Entrada guardada: $(basename "$entry_file")"
 }
@@ -569,7 +716,7 @@ generate_grub_entry_fallback() {
         *alpine*)
             vmlinuz="/boot/vmlinuz-lts"
             initrd="/boot/initramfs-lts"
-            params="iso-scan/filename=/isos/$iso_name alpine_dev=UUID:$part_uuid"
+            params="alpine_dev=UUID:$part_uuid iso-scan/filename=/isos/$iso_name"
             ;;
         *)
             vmlinuz="/casper/vmlinuz"
@@ -608,13 +755,12 @@ list_isos() {
     while IFS= read -r iso; do
         [[ -f "$iso" ]] || continue
         count=$((count + 1))
-        local name sz distro grub_ok
+        local name sz entry grub_ok
         name=$(basename "$iso")
         sz=$(du -h "$iso" | cut -f1)
-        distro=$(detect_distro "$name")
-        local entry="$ENTRIES_DIR/${name%.iso}.cfg"
+        entry="$ENTRIES_DIR/${name%.iso}.cfg"
         [[ -f "$entry" ]] && grub_ok="${G}en menú${N}" || grub_ok="${R}sin entrada GRUB${N}"
-        printf "  ${C}%2d)${N}  %-50s  %6s  [%b]\n" "$count" "$name" "$sz" "$grub_ok"
+        printf "  ${C}%2d)${N}  %-52s  %6s  [%b]\n" "$count" "$name" "$sz" "$grub_ok"
     done < <(find "$ISO_DIR" -maxdepth 2 -name "*.iso" 2>/dev/null | sort)
 
     if [[ "$count" -eq 0 ]]; then
@@ -651,7 +797,7 @@ remove_iso() {
     local i=1
     for iso in "${isos[@]}"; do
         local sz; sz=$(du -h "$iso" | cut -f1)
-        printf "  ${C}%2d)${N}  %-50s  %6s\n" "$i" "$(basename "$iso")" "$sz"
+        printf "  ${C}%2d)${N}  %-52s  %6s\n" "$i" "$(basename "$iso")" "$sz"
         i=$((i+1))
     done
     echo "   0)  Cancelar"
@@ -659,9 +805,7 @@ remove_iso() {
 
     local opt; opt=$(ask "¿Cuál eliminás? [0-${#isos[@]}]")
 
-    if [[ "$opt" == "0" ]]; then
-        banner; detect_system; menu_principal; return
-    fi
+    [[ "$opt" == "0" ]] && { banner; detect_system; menu_principal; return; }
 
     if ! [[ "$opt" =~ ^[0-9]+$ ]] || \
        [[ "$opt" -lt 1 ]] || [[ "$opt" -gt "${#isos[@]}" ]]; then
@@ -683,8 +827,7 @@ remove_iso() {
 
     step "Actualizando GRUB..."; grub_update
 
-    echo ""
-    ok "ISO eliminada: $tname"
+    echo ""; ok "ISO eliminada: $tname"
     pause; banner; detect_system; menu_principal
 }
 
@@ -697,10 +840,9 @@ main() {
     if [[ "$EUID" -ne 0 ]]; then
         echo ""
         echo -e "  ${R}Error:${N} Este script necesita permisos de administrador."
-        echo -e "  Ejecutalo con: ${W}sudo $0${N}\n"
+        echo -e "  Ejecutalo con: ${W}sudo ./rm-multiboot.sh${N}\n"
         exit 1
     fi
-
     banner
     detect_system
     menu_principal
