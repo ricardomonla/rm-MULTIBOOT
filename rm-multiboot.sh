@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.2.0
+#  Versión:  2.3.0
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.0"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -420,21 +420,75 @@ gdrive_real_filename() {
     echo "$name"
 }
 
-# Descarga un archivo desde Google Drive
+# Devuelve el Content-Length de una URL (0 si no disponible)
+get_remote_size() {
+    local url="$1"
+    local size
+    size=$(curl -sIL --connect-timeout 8 "$url" 2>/dev/null \
+           | grep -i '^content-length' | tail -1 | awk '{print $2}' | tr -d '\r')
+    echo "${size:-0}"
+}
+
+# Descarga URL → DEST mostrando barra de progreso en porcentaje propio.
+# Si el servidor no informa Content-Length muestra solo MB descargados.
+download_with_progress() {
+    local url="$1"
+    local dest="$2"
+
+    # Obtener tamaño total
+    printf "  Consultando tamaño del archivo..."
+    local total_bytes
+    total_bytes=$(get_remote_size "$url")
+    printf "\r                                    \r"
+
+    # Iniciar descarga en background (salida silenciada)
+    if command -v curl &>/dev/null; then
+        curl -sL -C - -o "$dest" "$url" &
+    elif command -v wget &>/dev/null; then
+        wget -q -c -O "$dest" "$url" &
+    else
+        err "No se encontró curl ni wget."; return 1
+    fi
+    local dl_pid=$!
+
+    # Loop de progreso
+    local done_b pct done_mb total_mb filled empty bar
+    while kill -0 "$dl_pid" 2>/dev/null; do
+        done_b=0
+        [[ -f "$dest" ]] && done_b=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+        done_mb=$(( done_b / 1024 / 1024 ))
+
+        if [[ "$total_bytes" -gt 0 ]]; then
+            pct=$(( done_b * 100 / total_bytes ))
+            total_mb=$(( total_bytes / 1024 / 1024 ))
+            filled=$(( pct * 20 / 100 ))
+            empty=$(( 20 - filled ))
+            bar=$(printf '%0.s#' $(seq 1 "$filled"))$(printf '%0.s-' $(seq 1 "$empty"))
+            printf "\r  ${C}→${N}  [%-20s]  %3d%%  (%d MB de %d MB)" \
+                "$bar" "$pct" "$done_mb" "$total_mb"
+        else
+            printf "\r  ${C}→${N}  %d MB descargados..." "$done_mb"
+        fi
+        sleep 0.3
+    done
+
+    wait "$dl_pid"
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        local final_mb
+        final_mb=$(( $(stat -c%s "$dest" 2>/dev/null || echo 0) / 1024 / 1024 ))
+        printf "\r  ${G}✓${N}  [####################]  100%%  (%d MB)                    \n" \
+            "$final_mb"
+    fi
+    return $rc
+}
+
+# Descarga un archivo desde Google Drive con progreso
 gdrive_download() {
     local file_id="$1"
     local dest="$2"
     local dl_url="https://drive.usercontent.google.com/download?id=${file_id}&export=download&authuser=0&confirm=t"
-
-    if command -v curl &>/dev/null; then
-        curl -L --progress-bar -o "$dest" "$dl_url" \
-            || return 1
-    elif command -v wget &>/dev/null; then
-        wget --show-progress -q -O "$dest" "$dl_url" \
-            || return 1
-    else
-        return 1
-    fi
+    download_with_progress "$dl_url" "$dest"
 }
 
 
@@ -595,24 +649,17 @@ download_from_catalog() {
     step "Descargando $iso_filename..."
     echo ""
 
+    local download_url
     if [[ -n "$gdrive_id" ]]; then
-        gdrive_download "$gdrive_id" "$dest" \
-            || { err "Falló la descarga desde Google Drive."; rm -f "$dest"; pause
-                 banner; detect_system; menu_principal; return; }
-    elif command -v wget &>/dev/null; then
-        wget --show-progress -q -c -O "$dest" "$chosen_url" \
-            || { err "Falló la descarga."; rm -f "$dest"; pause
-                 banner; detect_system; menu_principal; return; }
-    elif command -v curl &>/dev/null; then
-        curl -L -C - --progress-bar -o "$dest" "$chosen_url" \
-            || { err "Falló la descarga."; rm -f "$dest"; pause
-                 banner; detect_system; menu_principal; return; }
+        download_url="https://drive.usercontent.google.com/download?id=${gdrive_id}&export=download&authuser=0&confirm=t"
     else
-        err "No se encontró wget ni curl. Instalá uno de los dos e intentá de nuevo."
-        pause; banner; detect_system; menu_principal; return
+        download_url="$chosen_url"
     fi
 
-    echo ""
+    download_with_progress "$download_url" "$dest" \
+        || { err "Falló la descarga."; rm -f "$dest"; pause
+             banner; detect_system; menu_principal; return; }
+
     ok "Descarga completada: $iso_filename"
 
     # Generar entrada GRUB
