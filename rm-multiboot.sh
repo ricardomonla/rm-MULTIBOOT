@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.3.1
+#  Versión:  2.3.2
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.3.1"
+readonly SCRIPT_VERSION="2.3.2"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -453,13 +453,14 @@ download_with_progress() {
 
     # Loop de progreso
     local done_b pct done_mb total_mb filled empty bar
-    local prev_bytes=0 speed_str="0.0"
+    local prev_bytes=0 speed_str="0.0" eta_str="--:--"
+    local start_time; start_time=$(date +%s)
     while kill -0 "$dl_pid" 2>/dev/null; do
         done_b=0
         [[ -f "$dest" ]] && done_b=$(stat -c%s "$dest" 2>/dev/null || echo 0)
         done_mb=$(( done_b / 1024 / 1024 ))
 
-        # Velocidad: bytes descargados en el último intervalo (0.3 s) → MB/s
+        # Velocidad instantánea (delta en 0.3 s → MB/s)
         local delta=$(( done_b - prev_bytes ))
         [[ $delta -gt 0 ]] && \
             speed_str=$(awk "BEGIN {printf \"%.1f\", $delta / 0.3 / 1048576}")
@@ -471,8 +472,22 @@ download_with_progress() {
             filled=$(( pct * 20 / 100 ))
             empty=$(( 20 - filled ))
             bar=$(printf '%0.s#' $(seq 1 "$filled"))$(printf '%0.s-' $(seq 1 "$empty"))
-            printf "\r  ${C}→${N}  [%-20s]  %3d%%  (%d de %d MB)  %s MB/s  " \
-                "$bar" "$pct" "$done_mb" "$total_mb" "$speed_str"
+
+            # ETA basada en velocidad promedio desde el inicio (más estable que instantánea)
+            local elapsed=$(( $(date +%s) - start_time + 1 ))
+            local avg_bps=$(( done_b / elapsed ))
+            if [[ $avg_bps -gt 0 ]]; then
+                local secs=$(( (total_bytes - done_b) / avg_bps ))
+                if [[ $secs -lt 3600 ]]; then
+                    eta_str=$(printf "%02d:%02d" $(( secs / 60 )) $(( secs % 60 )))
+                else
+                    eta_str=$(printf "%d:%02d:%02d" \
+                        $(( secs / 3600 )) $(( (secs % 3600) / 60 )) $(( secs % 60 )))
+                fi
+            fi
+
+            printf "\r  ${C}→${N}  [%-20s]  %3d%%  (%d de %d MB)  %s MB/s  ETA %s  " \
+                "$bar" "$pct" "$done_mb" "$total_mb" "$speed_str" "$eta_str"
         else
             printf "\r  ${C}→${N}  %d MB  %s MB/s  " "$done_mb" "$speed_str"
         fi
