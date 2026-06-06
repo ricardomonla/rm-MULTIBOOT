@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.3.2"
+readonly SCRIPT_VERSION="2.5.0"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -30,10 +30,21 @@ readonly MULTIBOOT_MOUNT="/mnt/multiboot"
 readonly ISO_DIR="$MULTIBOOT_MOUNT/isos"
 readonly ENTRIES_DIR="$MULTIBOOT_MOUNT/grub/entries"
 readonly GRUB_HOOK="/etc/grub.d/41_multiboot"
+readonly LOG_FILE="/var/log/rm-multiboot.log"
 
 # ─── Colores ──────────────────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
 B='\033[0;34m' C='\033[0;36m' W='\033[1m' N='\033[0m'
+
+# ─── Log ──────────────────────────────────────────────────────────────────────
+log() {
+    local level="$1"; shift
+    printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >> "$LOG_FILE" 2>/dev/null
+}
+log_info()  { log INFO  "$*"; }
+log_warn()  { log WARN  "$*"; }
+log_err()   { log ERROR "$*"; }
+log_step()  { log STEP  "=== $* ==="; }
 
 # ─── Estado global (poblado por detect_system) ────────────────────────────────
 BOOT_MODE="" OS_NAME="" ROOT_DISK_DEV="" ROOT_DISK_SIZE=""
@@ -53,9 +64,9 @@ banner() {
     echo -e "${N}"
 }
 
-ok()      { echo -e "  ${G}✓${N}  $*"; }
-warn()    { echo -e "  ${Y}⚠${N}  $*"; }
-err()     { echo -e "  ${R}✗${N}  $*"; }
+ok()      { echo -e "  ${G}✓${N}  $*"; log_info  "OK: $(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g')"; }
+warn()    { echo -e "  ${Y}⚠${N}  $*"; log_warn  "$(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g')"; }
+err()     { echo -e "  ${R}✗${N}  $*"; log_err   "$(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g')"; }
 step()    { echo -e "\n  ${W}${C}→${N}  ${W}$*${N}"; }
 divider() { echo -e "\n  ${B}──────────────────────────────────────────────────────${N}\n"; }
 
@@ -96,6 +107,7 @@ grub_update() {
 # =============================================================================
 
 detect_system() {
+    log_step "Detectando sistema"
     step "Detectando sistema..."
     echo ""
 
@@ -211,48 +223,142 @@ menu_agregar_iso() {
 # SETUP WIZARD — crear la partición MULTIBOOT
 # =============================================================================
 
+# Devuelve todos los bloques de espacio libre ≥ 10 GiB en un disco dado.
+# Salida por línea: START_MiB END_MiB SIZE_MiB DISK
+_free_blocks_on_disk() {
+    local disk="$1"
+    parted -s "$disk" unit MiB print free 2>/dev/null \
+        | awk -v disk="$disk" \
+            '/Free Space/ && $3+0 >= 10240 {
+                gsub(/MiB/,"",$1); gsub(/MiB/,"",$2); gsub(/MiB/,"",$3)
+                print $1, $2, $3, disk
+            }'
+}
+
+# Detecta todos los destinos disponibles para crear MULTIBOOT.
+# Popula los arrays globales TARGET_LABEL[], TARGET_DISK[], TARGET_START[],
+# TARGET_SIZE_GIB[], TARGET_SCENARIO[]
+# Escenario 1: espacio sin particionar en cualquier disco
+# Escenario 2: disco entero sin particiones (disco secundario virgen)
+# Escenario 3: partición no-raíz con filesystem con espacio libre ≥ 10 GiB
+# Escenario 4: partición raíz con filesystem con espacio libre ≥ 10 GiB (requiere rescue)
+declare -a TARGET_LABEL TARGET_DISK TARGET_START TARGET_SIZE_GIB TARGET_SCENARIO
+detect_targets() {
+    TARGET_LABEL=(); TARGET_DISK=(); TARGET_START=()
+    TARGET_SIZE_GIB=(); TARGET_SCENARIO=()
+
+    local all_disks
+    mapfile -t all_disks < <(lsblk -dno NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}')
+
+    # Escenario 1: espacio libre sin particionar
+    local disk block
+    for disk in "${all_disks[@]}"; do
+        while read -r start _ size_mib bdisk; do
+            local gib=$(( size_mib / 1024 ))
+            TARGET_LABEL+=("Espacio libre en $bdisk (~${gib} GB)")
+            TARGET_DISK+=("$bdisk")
+            TARGET_START+=("$start")
+            TARGET_SIZE_GIB+=("$gib")
+            TARGET_SCENARIO+=("1")
+        done < <(_free_blocks_on_disk "$disk")
+    done
+
+    # Escenario 2: disco sin ninguna partición (virgen o vacío)
+    for disk in "${all_disks[@]}"; do
+        [[ "$disk" == "$ROOT_DISK_DEV" ]] && continue
+        local part_count
+        part_count=$(lsblk -lno NAME "$disk" 2>/dev/null | grep -v "^$(basename "$disk")$" | wc -l)
+        if [[ "$part_count" -eq 0 ]]; then
+            local gib
+            gib=$(lsblk -dno SIZE "$disk" | awk '{
+                if ($1~/G$/) {sub(/G$/,"",$1); printf "%d", $1}
+                else if ($1~/T$/) {sub(/T$/,"",$1); printf "%d", $1*1024}
+            }')
+            TARGET_LABEL+=("Disco completo $disk (~${gib} GB, sin particiones)")
+            TARGET_DISK+=("$disk")
+            TARGET_START+=("1")
+            TARGET_SIZE_GIB+=("$gib")
+            TARGET_SCENARIO+=("2")
+        fi
+    done
+
+    # Escenarios 3 y 4: particiones con filesystem con espacio libre
+    local part mp avail_kb avail_gib
+    while read -r part mp; do
+        [[ -z "$mp" || "$mp" == "[SWAP]" ]] && continue
+        avail_kb=$(df --output=avail "$mp" 2>/dev/null | tail -1 | tr -d ' ')
+        [[ -z "$avail_kb" || "$avail_kb" -lt $((10 * 1024 * 1024)) ]] && continue
+        avail_gib=$(( avail_kb / 1024 / 1024 ))
+        if [[ "$mp" == "/" ]]; then
+            TARGET_LABEL+=("Reducir partición raíz $part (${avail_gib} GB libres — requiere rescue)")
+            TARGET_SCENARIO+=("4")
+        else
+            TARGET_LABEL+=("Reducir partición $part montada en $mp (${avail_gib} GB libres)")
+            TARGET_SCENARIO+=("3")
+        fi
+        TARGET_DISK+=("$(lsblk -no PKNAME "$part" 2>/dev/null | head -1 | sed 's/^/\/dev\//')")
+        TARGET_START+=("")
+        TARGET_SIZE_GIB+=("$avail_gib")
+    done < <(lsblk -lno PATH,MOUNTPOINT 2>/dev/null | grep -v '^$')
+}
+
 setup_wizard() {
+    log_step "Setup wizard"
     banner
-    step "Asistente de configuración inicial"
+    step "Analizando opciones de disco disponibles..."
     echo ""
 
-    local free_raw
-    free_raw=$(parted -s "$ROOT_DISK_DEV" unit MiB print free 2>/dev/null \
-               | awk '/Free Space/ && $3+0 >= 10240 {print $1, $2, $3}')
+    detect_targets
 
-    if [[ -z "$free_raw" ]]; then
-        err "No se encontró espacio libre ≥ 10 GB sin asignar en $ROOT_DISK_DEV"
-        echo -e "\n  Para continuar necesitás liberar espacio con GParted u otra herramienta.\n"
+    if [[ "${#TARGET_LABEL[@]}" -eq 0 ]]; then
+        log_err "No se encontró ningún destino viable para MULTIBOOT"
+        err "No se encontró espacio disponible en ningún disco."
+        echo -e "\n  El disco tiene menos de 10 GB libres en cualquier partición o región."
+        echo -e "  Opciones: agregar un disco secundario o liberar espacio manualmente.\n"
         pause; exit 1
     fi
 
-    echo -e "  Espacio libre sin asignar en ${W}$ROOT_DISK_DEV${N}:\n"
-    local -a starts ends sizes
+    echo -e "  Destinos disponibles para la partición ${W}MULTIBOOT${N}:\n"
     local i=1
-    while read -r start end size; do
-        local size_gib
-        size_gib=$(echo "$size" | sed 's/MiB//' | awk '{printf "%.0f", $1/1024}')
-        starts+=("$start"); ends+=("$end"); sizes+=("$size_gib")
-        printf "    ${C}%d)${N}  %s GB libres  (desde %s hasta %s)\n" \
-            "$i" "$size_gib" "$start" "$end"
-        i=$((i+1))
-    done <<< "$free_raw"
+    for label in "${TARGET_LABEL[@]}"; do
+        local sc="${TARGET_SCENARIO[$((i-1))]}"
+        local tag=""
+        [[ "$sc" == "4" ]] && tag=" ${Y}[requiere rescue]${N}"
+        printf "    ${C}%d)${N}  %s%b\n" "$i" "$label" "$tag"
+        i=$(( i + 1 ))
+    done
+    echo "    0)  Salir"
     echo ""
 
-    local region_opt=1
-    if [[ "${#starts[@]}" -gt 1 ]]; then
-        region_opt=$(ask "¿En qué región crear la partición?" "1")
-        if ! [[ "$region_opt" =~ ^[0-9]+$ ]] || \
-           [[ "$region_opt" -lt 1 ]] || [[ "$region_opt" -gt "${#starts[@]}" ]]; then
-            err "Opción inválida."; pause; setup_wizard; return
-        fi
+    local opt
+    opt=$(ask "¿Qué destino usar? [0-${#TARGET_LABEL[@]}]" "1")
+    [[ "$opt" == "0" ]] && { echo ""; exit 0; }
+
+    if ! [[ "$opt" =~ ^[0-9]+$ ]] || \
+       [[ "$opt" -lt 1 ]] || [[ "$opt" -gt "${#TARGET_LABEL[@]}" ]]; then
+        err "Opción inválida."; pause; setup_wizard; return
     fi
 
-    local idx=$((region_opt - 1))
-    local free_start="${starts[$idx]}"
-    local max_gib="${sizes[$idx]}"
-    local recommended=$((max_gib > 100 ? 50 : max_gib))
+    local idx=$(( opt - 1 ))
+    local scenario="${TARGET_SCENARIO[$idx]}"
+    local target_disk="${TARGET_DISK[$idx]}"
+    local max_gib="${TARGET_SIZE_GIB[$idx]}"
 
+    log_info "Escenario seleccionado: $scenario — ${TARGET_LABEL[$idx]}"
+
+    case "$scenario" in
+        1|2) _wizard_create_partition "$target_disk" "${TARGET_START[$idx]}" "$max_gib" "$scenario" ;;
+        3)   _wizard_resize_nonroot "$target_disk" "$max_gib" ;;
+        4)   _wizard_rescue_root "$target_disk" "$max_gib" ;;
+    esac
+}
+
+# Escenarios 1 y 2: crear partición en espacio libre o disco virgen
+_wizard_create_partition() {
+    local disk="$1" start_mib="$2" max_gib="$3" scenario="$4"
+
+    local recommended=$(( max_gib > 100 ? 50 : max_gib ))
+    echo ""
     echo -e "  ${Y}Nota:${N} cada ISO pesa entre 600 MB y 5 GB."
     echo -e "  Recomendado: ≥ 30 GB para tener varias ISOs.\n"
     local size_gb
@@ -260,20 +366,18 @@ setup_wizard() {
 
     if ! [[ "$size_gb" =~ ^[0-9]+$ ]] || \
        [[ "$size_gb" -lt 10 ]] || [[ "$size_gb" -gt "$max_gib" ]]; then
-        err "Tamaño inválido. Debe ser un número entre 10 y $max_gib."; pause
+        err "Tamaño inválido. Debe ser entre 10 y $max_gib."; pause
         setup_wizard; return
     fi
 
-    local start_mib end_mib
-    start_mib=$(echo "$free_start" | sed 's/MiB//')
-    end_mib=$((start_mib + size_gb * 1024))
+    local end_mib=$(( start_mib + size_gb * 1024 ))
 
     echo ""
     echo -e "  ${W}Resumen:${N}"
-    echo -e "    Disco:          $ROOT_DISK_DEV"
-    echo -e "    Tamaño:         ${size_gb} GB"
-    echo -e "    Etiqueta:       $MULTIBOOT_LABEL"
-    echo -e "    Sistema de arch: ext4"
+    echo -e "    Disco:            $disk"
+    echo -e "    Tamaño:           ${size_gb} GB"
+    echo -e "    Etiqueta:         $MULTIBOOT_LABEL"
+    echo -e "    Sistema de archivos: ext4"
     echo -e "    Punto de montaje: $MULTIBOOT_MOUNT"
     echo ""
 
@@ -284,29 +388,36 @@ setup_wizard() {
     echo ""
     step "Creando partición..."
 
+    # En escenario 2 (disco virgen) inicializar tabla de particiones primero
+    if [[ "$scenario" == "2" ]]; then
+        parted -s "$disk" mklabel gpt 2>/dev/null
+        start_mib=1
+        end_mib=$(( start_mib + size_gb * 1024 ))
+    fi
+
     local parts_before
-    parts_before=$(lsblk -lno NAME "$ROOT_DISK_DEV" \
-                   | grep -v "^$(basename "$ROOT_DISK_DEV")$" | sort)
+    parts_before=$(lsblk -lno NAME "$disk" \
+                   | grep -v "^$(basename "$disk")$" | sort)
 
     local part_table
-    part_table=$(parted -s "$ROOT_DISK_DEV" print 2>/dev/null \
+    part_table=$(parted -s "$disk" print 2>/dev/null \
                  | awk '/Partition Table/{print $3}')
 
     if [[ "$part_table" == "gpt" ]]; then
-        parted -s "$ROOT_DISK_DEV" mkpart "$MULTIBOOT_LABEL" ext4 \
+        parted -s "$disk" mkpart "$MULTIBOOT_LABEL" ext4 \
             "${start_mib}MiB" "${end_mib}MiB" 2>/dev/null
     else
-        parted -s "$ROOT_DISK_DEV" mkpart primary ext4 \
+        parted -s "$disk" mkpart primary ext4 \
             "${start_mib}MiB" "${end_mib}MiB" 2>/dev/null
     fi
 
-    sleep 1; partprobe "$ROOT_DISK_DEV" 2>/dev/null || true; sleep 1
+    sleep 1; partprobe "$disk" 2>/dev/null || true; sleep 1
 
     local new_part
     new_part=$(comm -13 \
         <(echo "$parts_before") \
-        <(lsblk -lno NAME "$ROOT_DISK_DEV" \
-          | grep -v "^$(basename "$ROOT_DISK_DEV")$" | sort) \
+        <(lsblk -lno NAME "$disk" \
+          | grep -v "^$(basename "$disk")$" | sort) \
         | head -1)
 
     if [[ -z "$new_part" ]]; then
@@ -316,6 +427,162 @@ setup_wizard() {
     MULTIBOOT_DEV="/dev/$new_part"
     ok "Partición creada: $MULTIBOOT_DEV"
 
+    _wizard_format_and_mount "$size_gb"
+}
+
+# Escenario 3: redimensionar partición no-raíz en caliente
+_wizard_resize_nonroot() {
+    local disk="$1" avail_gib="$2"
+    warn "Esta operación redimensionará una partición montada."
+    echo -e "  El filesystem se reducirá primero con resize2fs y luego se ajusta la partición.\n"
+
+    local size_gb
+    size_gb=$(ask "¿Cuántos GB liberar para MULTIBOOT? (máx $avail_gib)" "20")
+    if ! [[ "$size_gb" =~ ^[0-9]+$ ]] || [[ "$size_gb" -lt 10 ]]; then
+        err "Tamaño inválido."; pause; setup_wizard; return
+    fi
+
+    if ! confirm "¿Continuar? Esta operación modifica la tabla de particiones."; then
+        echo ""; warn "Cancelado."; pause; exit 0
+    fi
+
+    warn "Redimensionamiento en caliente no disponible aún en esta versión."
+    echo -e "  Usá el modo rescue (opción de partición raíz) para mayor seguridad.\n"
+    log_warn "Escenario 3 (resize no-raíz) no implementado aún"
+    pause; setup_wizard
+}
+
+# Escenario 4: la única opción es reducir la raíz — generar script rescue
+_wizard_rescue_root() {
+    local root_disk="$1" avail_gib="$2"
+    local rescue_script="/root/rm-multiboot-rescue.sh"
+    local safety_margin=10
+    local max_free=$(( avail_gib - safety_margin ))
+
+    if [[ "$max_free" -lt 10 ]]; then
+        err "Espacio insuficiente: el filesystem raíz tiene solo ${avail_gib} GB libres."
+        echo -e "  Se necesitan al menos $((10 + safety_margin)) GB libres en / para continuar.\n"
+        pause; exit 1
+    fi
+
+    echo ""
+    echo -e "  ${Y}El disco no tiene espacio sin particionar.${N}"
+    echo -e "  La partición raíz tiene ${W}${avail_gib} GB libres${N} que pueden redistribuirse.\n"
+    echo -e "  ${W}Solución:${N} rm-multiboot genera un script que se ejecuta desde un"
+    echo -e "  ${W}Live CD / modo rescue${N} para reducir la raíz y crear MULTIBOOT.\n"
+
+    local recommended=$(( max_free > 50 ? 30 : max_free ))
+    local size_gb
+    size_gb=$(ask "¿Cuántos GB asignar a MULTIBOOT? (máx disponible: $max_free)" "$recommended")
+
+    if ! [[ "$size_gb" =~ ^[0-9]+$ ]] || \
+       [[ "$size_gb" -lt 10 ]] || [[ "$size_gb" -gt "$max_free" ]]; then
+        err "Tamaño inválido. Debe ser entre 10 y $max_free."; pause
+        setup_wizard; return
+    fi
+
+    step "Generando script de rescue..."
+
+    # Obtener datos del disco actual
+    local root_part root_part_num root_size_mib new_root_end_mib mb_start_mib mb_end_mib
+    root_part=$(findmnt -n -o SOURCE / | head -1)
+    root_part_num=$(parted -s "$root_disk" print 2>/dev/null \
+        | awk -v part="$root_part" '$0 ~ part {print $1}' | head -1)
+    [[ -z "$root_part_num" ]] && root_part_num=$(echo "$root_part" | grep -o '[0-9]*$')
+    root_size_mib=$(parted -s "$root_disk" unit MiB print 2>/dev/null \
+        | awk -v n="$root_part_num" '$1==n {gsub(/MiB/,"",$3); print $3}')
+    local keep_mib=$(( root_size_mib - size_gb * 1024 ))
+    local root_start_mib
+    root_start_mib=$(parted -s "$root_disk" unit MiB print 2>/dev/null \
+        | awk -v n="$root_part_num" '$1==n {gsub(/MiB/,"",$2); print $2}')
+    new_root_end_mib=$(( root_start_mib + keep_mib ))
+    mb_start_mib="$new_root_end_mib"
+    mb_end_mib=$(( mb_start_mib + size_gb * 1024 ))
+    local part_table
+    part_table=$(parted -s "$root_disk" print 2>/dev/null | awk '/Partition Table/{print $3}')
+
+    cat > "$rescue_script" << RESCUE
+#!/bin/bash
+# =============================================================================
+#  rm-multiboot-rescue.sh — Script de redimensionamiento para modo rescue
+#  Generado por rm-multiboot.sh v${SCRIPT_VERSION} el $(date '+%Y-%m-%d %H:%M:%S')
+#  EJECUTAR DESDE LIVE CD O MODO RESCUE — NO ejecutar con el sistema montado
+# =============================================================================
+set -euo pipefail
+DISK="$root_disk"
+ROOT_PART="$root_part"
+ROOT_PART_NUM="$root_part_num"
+MB_LABEL="$MULTIBOOT_LABEL"
+MB_MOUNT="$MULTIBOOT_MOUNT"
+PART_TABLE="$part_table"
+KEEP_MIB=$keep_mib
+ROOT_START_MIB=$root_start_mib
+NEW_ROOT_END_MIB=$new_root_end_mib
+MB_START_MIB=$mb_start_mib
+MB_END_MIB=$mb_end_mib
+SIZE_GB=$size_gb
+
+echo "=== rm-multiboot rescue script ==="
+echo "Disco: \$DISK | Raíz: \$ROOT_PART | MULTIBOOT: \${SIZE_GB} GB"
+echo ""
+echo "ADVERTENCIA: Esta operación modifica particiones."
+echo "Asegurate de tener un backup antes de continuar."
+read -rp "¿Continuar? [s/N]: " ans
+[[ "\${ans,,}" != "s" ]] && exit 0
+
+echo "[1/5] Verificando filesystem raíz..."
+e2fsck -f "\$ROOT_PART"
+
+echo "[2/5] Reduciendo filesystem a \${KEEP_MIB} MiB..."
+resize2fs "\$ROOT_PART" "\${KEEP_MIB}M"
+
+echo "[3/5] Reduciendo partición raíz..."
+if [[ "\$PART_TABLE" == "gpt" ]]; then
+    parted -s "\$DISK" resizepart "\$ROOT_PART_NUM" "\${NEW_ROOT_END_MIB}MiB"
+else
+    parted -s "\$DISK" resizepart "\$ROOT_PART_NUM" "\${NEW_ROOT_END_MIB}MiB"
+fi
+
+echo "[4/5] Creando partición MULTIBOOT..."
+if [[ "\$PART_TABLE" == "gpt" ]]; then
+    parted -s "\$DISK" mkpart "\$MB_LABEL" ext4 "\${MB_START_MIB}MiB" "\${MB_END_MIB}MiB"
+else
+    parted -s "\$DISK" mkpart primary ext4 "\${MB_START_MIB}MiB" "\${MB_END_MIB}MiB"
+fi
+partprobe "\$DISK" 2>/dev/null || true; sleep 2
+
+MB_DEV=\$(lsblk -lno NAME "\$DISK" | grep -v "^\$(basename \$DISK)\$" | sort | tail -1)
+MB_DEV="/dev/\$MB_DEV"
+
+echo "[5/5] Formateando \$MB_DEV como ext4 con etiqueta \$MB_LABEL..."
+mkfs.ext4 -L "\$MB_LABEL" "\$MB_DEV"
+
+echo ""
+echo "=== Listo. Reiniciá el sistema normalmente y ejecutá rm-multiboot.sh ==="
+RESCUE
+
+    chmod +x "$rescue_script"
+    ok "Script generado: ${W}$rescue_script${N}"
+    log_info "Script rescue generado: $rescue_script (${size_gb} GB para MULTIBOOT)"
+
+    divider
+    echo -e "  ${W}Próximos pasos para completar la instalación:${N}\n"
+    echo -e "  ${C}1)${N}  Reiniciá desde un ${W}Live CD${N} (cualquier distro Linux)"
+    echo -e "       o desde el ${W}modo rescue${N} del instalador de Debian/Ubuntu\n"
+    echo -e "  ${C}2)${N}  Montá la partición raíz y copiá el script:"
+    echo -e "       ${W}mount $root_part /mnt${N}"
+    echo -e "       ${W}cp /mnt/root/rm-multiboot-rescue.sh /tmp/${N}\n"
+    echo -e "  ${C}3)${N}  Ejecutá el script de rescue:"
+    echo -e "       ${W}bash /tmp/rm-multiboot-rescue.sh${N}\n"
+    echo -e "  ${C}4)${N}  Reiniciá en modo normal y volvé a ejecutar:"
+    echo -e "       ${W}sudo ./rm-multiboot.sh${N}\n"
+    echo -e "  El script generado está en: ${W}$rescue_script${N}"
+    log_step "Fin setup wizard — pendiente rescue"
+    pause
+}
+
+_wizard_format_and_mount() {
+    local size_gb="${1:-?}"
     step "Formateando como ext4..."
     mkfs.ext4 -L "$MULTIBOOT_LABEL" -q "$MULTIBOOT_DEV"
     ok "Formato aplicado con etiqueta '$MULTIBOOT_LABEL'"
@@ -1026,6 +1293,9 @@ main() {
         echo -e "  Ejecutalo con: ${W}sudo ./rm-multiboot.sh${N}\n"
         exit 1
     fi
+    log_step "Inicio rm-multiboot.sh v${SCRIPT_VERSION}"
+    log_info "Usuario: $(whoami) | PID: $$"
+    log_info "Sistema: $(uname -sr) | Host: $(hostname)"
     banner
     detect_system
     menu_principal

@@ -3,7 +3,7 @@
 **Proyecto:** rm-MULTIBOOT  
 **Autor:** Lic. Ricardo MONLA  
 **Fecha de inicio:** 2026-06-06  
-**Estado general:** 🔄 En progreso
+**Estado general:** 🔄 En progreso — Fase 1 completada, iniciando Fase 2
 
 ---
 
@@ -41,7 +41,7 @@ Fase 2 ──→ [Conclusión] ──→ Replanteo Fase 3
 
 ### FASE 1 — Preparación del entorno VirtualBox
 
-**Estado:** 🔄 En progreso — pendiente instalación del SO en la VM  
+**Estado:** ✅ Completada  
 **Objetivo:** Tener una VM Linux operativa con disco configurado para simular
 un equipo real con espacio libre disponible para crear la partición MULTIBOOT.
 
@@ -61,21 +61,13 @@ un equipo real con espacio libre disponible para crear la partición MULTIBOOT.
 #### Tareas
 
 - [x] **1.1** Crear la VM en VirtualBox con las especificaciones indicadas
-- [ ] **1.2** Instalar el SO base dejando al menos 15 GB sin asignar en el disco
-- [ ] **1.3** Verificar con `lsblk -f` que hay espacio libre sin particionar
-- [ ] **1.4** Instalar dependencias necesarias en la VM:
-  ```bash
-  sudo apt install -y git curl wget parted e2fsprogs
-  ```
-- [ ] **1.5** Verificar acceso a internet desde la VM:
-  ```bash
-  curl -Is https://raw.githubusercontent.com | head -1
-  ```
+- [x] **1.2** Instalar el SO base *(ver hallazgo #2 — disco usado al 100%, sin espacio libre)*
+- [x] **1.3** Verificar con `lsblk -f` — sda1 ext4 40GB al 3%, sda5 swap, sin espacio sin particionar
+- [x] **1.4** Instalar dependencias: git, curl, wget, parted, e2fsprogs ✓
+- [x] **1.5** Acceso a internet desde la VM: `HTTP/2 301` ✓
 - [x] **1.6** Tomar snapshot de VirtualBox con nombre `00-base-limpia`
-- [ ] **1.7** Clonar el repositorio dentro de la VM:
-  ```bash
-  git clone https://github.com/ricardomonla/rm-MULTIBOOT.git ~/rm-MULTIBOOT
-  ```
+- [x] **1.7** Repositorio clonado en `/root/rm-MULTIBOOT` ✓
+- [x] **1.8** SSH habilitado via VirtualBox Guest Additions + guestcontrol *(ver hallazgo #5)*
 
 #### Notas de ejecución
 
@@ -93,8 +85,46 @@ un equipo real con espacio libre disponible para crear la partición MULTIBOOT.
 HALLAZGO: La URL de Debian en isos.conf estaba desactualizada (12.9.0 → 13.5.0).
 Debian ya publicó la versión 13 (Trixie). Requiere actualizar isos.conf.
 
-PENDIENTE: Iniciar la VM en VirtualBox GUI e instalar Debian 13
-dejando ~20 GB sin particionar (tareas 1.2 a 1.7).
+--- Primera instalación (fallida) ---
+- Se instaló Debian 13.5.0 desde la GUI de VirtualBox
+- Al reiniciar: pantalla negra con cursor parpadeante = GRUB no instalado en MBR
+- Intento de SSH para rescue → sin respuesta (VM no arrancaba)
+- Diagnóstico: el instalador probablemente no instaló GRUB correctamente
+
+--- Reinstalación limpia ---
+- Se conectó la ISO al DVD y se reinició la VM
+- Reinstalación con opción "usar todo el disco" (sin espacio libre)
+- GRUB instalado correctamente en /dev/sda
+- VM arranca y login funciona: usuario rmonla / Debian 13 (Trixie)
+
+--- Intento de SSH (fallido) ---
+- Port forwarding host:2222 → VM:22 configurado y activo
+- SSH falla con "Permission denied" — Debian deshabilita PasswordAuthentication por defecto
+- Requiere habilitación manual desde consola de la VM (tarea 1.8)
+
+--- Instalación de VirtualBox Guest Additions ---
+- ISO /usr/share/virtualbox/VBoxGuestAdditions.iso conectada al DVD via VBoxManage
+- Montaje del DVD: mount /dev/cdrom /mnt (ejecutado via scancodes directos)
+- Instalador ejecutado: sh /mnt/VBoxLinuxAdditions.run
+- Resultado: instalación parcial — faltan linux-headers del kernel
+  (kernel 6.12.90+deb13.1-amd64 sin headers instalados)
+- A pesar de la instalación parcial, VBoxManage guestcontrol funcionó
+
+--- Habilitación de SSH via guestcontrol ---
+- Problema con keymap: VM tiene layout 'es' (España), host tiene 'latam'
+  Efecto: '/' → '-', "'" → '{', '-' → "'"
+- Solución: crear scripts en el host, copiarlos con 'guestcontrol copyto'
+  y ejecutarlos con 'guestcontrol run --exe /usr/bin/sh -- /tmp/script.sh'
+- SSH configurado: PasswordAuthentication yes + PermitRootLogin yes
+- Conexión SSH verificada: root@127.0.0.1:2222 ✓
+
+--- Estado final del disco (lsblk -f) ---
+NAME   FSTYPE  LABEL    FSAVAIL  FSUSE%  MOUNTPOINT
+sda
+├─sda1 ext4             34.1G    3%      /
+├─sda2                                  (extendida)
+└─sda5 swap                             [SWAP]
+HALLAZGO: Disco 100% particionado — el script debe manejar este escenario real.
 ```
 
 #### Conclusión y hallazgos
@@ -103,59 +133,93 @@ dejando ~20 GB sin particionar (tareas 1.2 a 1.7).
 | # | Hallazgo | Impacto en fase siguiente |
 |---|---|---|
 | 1 | URLs de Debian en `isos.conf` desactualizadas (v12 → v13) | Actualizar catálogo antes de Fase 3 |
-| — | *(resto pendiente hasta completar instalación del SO)* | — |
+| 2 | Instalación con "todo el disco" no deja espacio libre — **este es el escenario real más común** | El script debe detectar disco lleno y actuar: redimensionar partición existente o pedir al usuario que libere espacio. La Fase 2 prueba justamente eso |
+| 3 | Debian deshabilita SSH `PasswordAuthentication` por defecto | En producción no afecta al script; para pruebas se resolvió con guestcontrol |
+| 4 | Primera instalación de Debian no instaló GRUB en MBR → pantalla negra | En netinstall hay que confirmar el paso de instalación de GRUB explícitamente |
+| 5 | `keyboardputstring` de VBoxManage no maneja diferencia de keymaps (host:latam / VM:es) — chars especiales (`/`, `'`, `-`) llegan incorrectos | Solución definitiva: usar Guest Additions + `guestcontrol copyto` + `guestcontrol run` para automatización; `keyboardputscancode` con KP_Divide para rutas en último recurso |
 
-**¿Se ajusta el plan de la Fase 2?** 🔲 Sí / 🔲 No  
-**Ajustes realizados:** *(pendiente cierre de fase)*
+**¿Se ajusta el plan de la Fase 2?** ✅ Sí  
+**Ajustes realizados:** La Fase 2 debe probarse con disco 100% particionado (sin espacio libre). El script debe detectar esta situación y ofrecer opciones al usuario (reducir partición existente, o usar disco secundario). Esto es el escenario real más común.
 
 ---
 
 ### FASE 2 — Ejecución del setup inicial
 
-**Estado:** 🔲 Pendiente  
+**Estado:** 🔄 En progreso  
 **Prerequisito:** Fase 1 completada y hallazgos revisados.  
-**Objetivo:** Verificar que el wizard de setup detecta correctamente el sistema,
-encuentra el espacio libre, crea la partición MULTIBOOT y la integra en GRUB.
+**Objetivo:** Verificar que el wizard de setup detecta correctamente el sistema
+y maneja todos los escenarios de disco reales — incluyendo disco 100% particionado.
+
+> **Ajuste post-Fase 1:** La Fase 2 amplía su alcance para incluir la implementación
+> y prueba del motor de detección de espacio ampliado (Escenarios 1–4).
+
+#### Escenarios de disco que el script debe cubrir
+
+| # | Escenario | Acción del script |
+|---|---|---|
+| 1 | Espacio libre sin particionar ≥ 10 GB | Crear partición directamente (ya implementado) |
+| 2 | Segundo disco disponible | Ofrecer crear MULTIBOOT en ese disco |
+| 3 | Solo espacio libre en filesystem raíz (no en partición) | Generar script de rescue + instrucciones para live CD |
+| 4 | Partición no raíz con espacio reutilizable | Redimensionar en caliente |
 
 #### Tareas
 
-- [ ] **2.1** Ejecutar el script como root y registrar la salida de detección:
-  ```bash
-  sudo ~/rm-MULTIBOOT/rm-multiboot.sh
-  ```
-- [ ] **2.2** Verificar que la detección muestra correctamente:
-  - [ ] Modo de arranque (BIOS/UEFI)
-  - [ ] SO detectado
-  - [ ] Disco principal correcto
-  - [ ] Espacio libre identificado
-- [ ] **2.3** Completar el wizard de setup asignando al menos 15 GB
-- [ ] **2.4** Verificar resultado post-setup:
+- [x] **2.1** Ejecutar el script v2.3.2 y registrar la salida de detección
+- [x] **2.2** Verificar detección del sistema:
+  - [x] Modo de arranque: **BIOS Legacy** ✓
+  - [x] SO detectado: **Debian GNU/Linux 13 (trixie)** ✓
+  - [x] Disco principal: **/dev/sda (40G)** ✓
+  - [x] Espacio libre: **no encontrado** → error registrado en log ✓
+- [x] **2.3** Agregar sistema de log al script → `/var/log/rm-multiboot.log` (v2.4.0)
+- [ ] **2.4** Implementar motor de detección de espacio ampliado (Escenarios 1–4)
+- [ ] **2.5** Implementar Escenario 3: generar script de rescue para live CD cuando la raíz es la única candidata
+- [ ] **2.6** Probar el flujo completo en la VM via modo rescue (DVD Debian → rescue → script generado)
+- [ ] **2.7** Verificar resultado post-setup:
   ```bash
   lsblk -f
   grep MULTIBOOT /etc/fstab
   ls /mnt/multiboot/
   cat /etc/grub.d/41_multiboot
   ```
-- [ ] **2.5** Verificar que GRUB fue actualizado sin errores:
+- [ ] **2.8** Verificar que GRUB fue actualizado sin errores:
   ```bash
   grep -i multiboot /boot/grub/grub.cfg
   ```
-- [ ] **2.6** Tomar snapshot: `01-post-setup`
+- [ ] **2.9** Tomar snapshot: `01-post-setup`
 
 #### Notas de ejecución
 
 ```
-[ espacio para registrar lo que ocurrió ]
+2026-06-06 — Ejecución del script v2.3.2 en la VM via SSH
+
+Salida real del script:
+  ✓  Modo de arranque: BIOS Legacy
+  ✓  Sistema operativo: Debian GNU/Linux 13 (trixie)
+  ✓  Disco principal: /dev/sda (  40G)
+  ⚠  Partición MULTIBOOT: no encontrada
+
+  → Opción 1: Preparar este equipo para multiboot
+
+  ✗  No se encontró espacio libre ≥ 10 GB sin asignar en /dev/sda
+  Para continuar necesitás liberar espacio con GParted u otra herramienta.
+
+La detección del sistema funciona perfectamente.
+El error de espacio libre es correcto — el disco está 100% particionado.
+El mensaje al usuario es claro pero la acción siguiente no está implementada en el script.
+
+PENDIENTE: Implementar en el script la estrategia para disco sin espacio libre.
 ```
 
 #### Conclusión y hallazgos
 
 | # | Hallazgo | Impacto en fase siguiente |
 |---|---|---|
-| — | *(pendiente)* | — |
+| 1 | El script solo maneja espacio libre sin particionar. Con disco 100% usado sale con error y deriva al usuario a GParted. Falta implementar la lógica de redimensionamiento automático. | Antes de continuar la Fase 2, hay que agregar esta funcionalidad al script |
+| 2 | La detección del sistema (BIOS/UEFI, OS, disco) funciona correctamente en la VM | Sin impacto negativo |
+| 3 | El script no tiene sistema de log — toda la información se pierde al cerrar | Agregar log a `/var/log/rm-multiboot.log` en la próxima versión del script |
 
 **¿Se ajusta el plan de la Fase 3?** 🔲 Sí / 🔲 No  
-**Ajustes realizados:** *(ninguno hasta completar esta fase)*
+**Ajustes realizados:** *(pendiente cierre de fase)*
 
 ---
 
@@ -246,12 +310,16 @@ y que al menos una arranca correctamente en modo live.
 
 ---
 
-### FASE 5 — Prueba de casos borde y condiciones adversas
+### FASE 5 — Prueba de escenarios avanzados y condiciones adversas
 
 **Estado:** 🔲 Pendiente  
 **Prerequisito:** Fase 4 completada y hallazgos revisados.  
-**Objetivo:** Validar el comportamiento del script ante situaciones no ideales:
-sin red, disco lleno, partición ya existente, modo UEFI, etc.
+**Objetivo:** Validar el comportamiento del script ante escenarios reales de mayor
+complejidad: sin red, múltiples discos, tabla GPT, modo UEFI, segunda ejecución.
+
+> **Ajuste post-Fase 2:** "Disco sin espacio libre" ya NO es caso borde —
+> es el escenario base implementado en Fase 2. Esta fase prueba escenarios
+> adicionales no cubiertos en fases anteriores.
 
 #### Tareas — Sin conexión a internet
 
@@ -271,13 +339,19 @@ sin red, disco lleno, partición ya existente, modo UEFI, etc.
   ```
 - [ ] **5.7** Reiniciar y verificar que la ISO eliminada ya no aparece en GRUB
 
+#### Tareas — Segundo disco (Escenario 2)
+
+- [ ] **5.8** Agregar un segundo disco VDI a la VM desde el host
+- [ ] **5.9** Verificar que el script detecta el segundo disco y lo ofrece como destino
+- [ ] **5.10** Completar el setup usando el segundo disco
+
 #### Tareas — Modo UEFI
 
-- [ ] **5.8** Restaurar snapshot `00-base-limpia`
-- [ ] **5.9** Cambiar la VM a modo EFI en VirtualBox (Configuración → Sistema → Habilitar EFI)
-- [ ] **5.10** Reinstalar el SO base en modo UEFI
-- [ ] **5.11** Repetir el setup con `rm-multiboot.sh` y verificar detección UEFI
-- [ ] **5.12** Verificar que el hook de GRUB funciona igual en UEFI
+- [ ] **5.11** Restaurar snapshot `00-base-limpia`
+- [ ] **5.12** Cambiar la VM a modo EFI en VirtualBox (Configuración → Sistema → Habilitar EFI)
+- [ ] **5.13** Reinstalar el SO base en modo UEFI
+- [ ] **5.14** Repetir el setup con `rm-multiboot.sh` y verificar detección UEFI
+- [ ] **5.15** Verificar que el hook de GRUB funciona igual en UEFI
 
 #### Notas de ejecución
 
@@ -343,7 +417,7 @@ fallaron y documentar el estado final del script para uso en producción.
 
 ## Checklist general de avance
 
-- [ ] Fase 1 — Entorno VirtualBox preparado
+- [x] Fase 1 — Entorno VirtualBox preparado
 - [ ] Fase 2 — Setup inicial validado
 - [ ] Fase 3 — Descargas y catálogo validados
 - [ ] Fase 4 — Arranque GRUB validado
