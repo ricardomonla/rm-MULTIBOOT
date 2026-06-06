@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.1.0
+#  Versión:  2.2.0
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.1.0"
+readonly SCRIPT_VERSION="2.2.0"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -391,6 +391,54 @@ mount_multiboot() {
 
 
 # =============================================================================
+# SOPORTE GOOGLE DRIVE
+# =============================================================================
+
+# Devuelve true si la URL es de Google Drive
+is_gdrive_url() {
+    [[ "$1" == *"drive.google.com"* ]]
+}
+
+# Extrae el File ID de una URL de Google Drive
+gdrive_file_id() {
+    local url="$1"
+    if [[ "$url" =~ drive\.google\.com/file/d/([a-zA-Z0-9_-]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$url" =~ id=([a-zA-Z0-9_-]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+}
+
+# Intenta obtener el nombre real del archivo desde el header Content-Disposition
+gdrive_real_filename() {
+    local file_id="$1"
+    local dl_url="https://drive.usercontent.google.com/download?id=${file_id}&export=download&authuser=0&confirm=t"
+    local name
+    name=$(curl -sIL --connect-timeout 8 "$dl_url" 2>/dev/null \
+           | grep -i 'content-disposition' \
+           | grep -oP 'filename="?\K[^";\r\n]+' | head -1 | tr -d '\r')
+    echo "$name"
+}
+
+# Descarga un archivo desde Google Drive
+gdrive_download() {
+    local file_id="$1"
+    local dest="$2"
+    local dl_url="https://drive.usercontent.google.com/download?id=${file_id}&export=download&authuser=0&confirm=t"
+
+    if command -v curl &>/dev/null; then
+        curl -L --progress-bar -o "$dest" "$dl_url" \
+            || return 1
+    elif command -v wget &>/dev/null; then
+        wget --show-progress -q -O "$dest" "$dl_url" \
+            || return 1
+    else
+        return 1
+    fi
+}
+
+
+# =============================================================================
 # DESCARGAR DESDE CATÁLOGO (isos.conf leído desde GitHub)
 # =============================================================================
 
@@ -491,15 +539,39 @@ download_from_catalog() {
     local idx=$((opt - 1))
     local chosen_name="${names[$idx]}"
     local chosen_url="${urls[$idx]}"
-    local iso_filename
-    iso_filename=$(basename "${chosen_url%%\?*}")
+    local iso_filename gdrive_id=""
+
+    # ── Resolver filename y origen de descarga ────────────────────────────────
+    if is_gdrive_url "$chosen_url"; then
+        gdrive_id=$(gdrive_file_id "$chosen_url")
+        if [[ -z "$gdrive_id" ]]; then
+            err "No se pudo extraer el File ID de la URL de Google Drive."
+            pause; banner; detect_system; menu_principal; return
+        fi
+        # Intentar obtener el nombre real del archivo desde headers
+        printf "  Obteniendo nombre del archivo desde Google Drive..."
+        iso_filename=$(gdrive_real_filename "$gdrive_id")
+        if [[ -z "$iso_filename" ]]; then
+            # Fallback: generar nombre desde el nombre del catálogo
+            iso_filename=$(echo "$chosen_name" | tr '[:upper:]' '[:lower:]' \
+                           | tr ' ' '-' | sed 's/[^a-z0-9._-]//g').iso
+        fi
+        printf "\r  ${G}✓${N}  Archivo: ${W}%s${N}                    \n" "$iso_filename"
+    else
+        iso_filename=$(basename "${chosen_url%%\?*}")
+    fi
+
     local dest="$ISO_DIR/$iso_filename"
 
     echo ""
     echo -e "  ${W}ISO seleccionada:${N}"
-    ok "Nombre:  ${W}$chosen_name${N}"
-    ok "Archivo: $iso_filename"
-    ok "URL:     ${C}$chosen_url${N}"
+    ok "Nombre:   ${W}$chosen_name${N}"
+    ok "Archivo:  $iso_filename"
+    if [[ -n "$gdrive_id" ]]; then
+        ok "Origen:   ${C}Google Drive${N} (ID: $gdrive_id)"
+    else
+        ok "URL:      ${C}$chosen_url${N}"
+    fi
     echo ""
 
     # Verificar si ya existe
@@ -510,7 +582,6 @@ download_from_catalog() {
         fi
     fi
 
-    # Verificar espacio (estimamos con el tamaño del Content-Length del servidor)
     local avail_k
     avail_k=$(df "$MULTIBOOT_MOUNT" --output=avail | tail -1)
     echo -e "  Espacio libre en MULTIBOOT: $(( avail_k / 1024 / 1024 )) GB\n"
@@ -519,12 +590,16 @@ download_from_catalog() {
         banner; detect_system; menu_principal; return
     fi
 
-    # Descargar
+    # ── Descargar ─────────────────────────────────────────────────────────────
     echo ""
     step "Descargando $iso_filename..."
     echo ""
 
-    if command -v wget &>/dev/null; then
+    if [[ -n "$gdrive_id" ]]; then
+        gdrive_download "$gdrive_id" "$dest" \
+            || { err "Falló la descarga desde Google Drive."; rm -f "$dest"; pause
+                 banner; detect_system; menu_principal; return; }
+    elif command -v wget &>/dev/null; then
         wget --show-progress -q -c -O "$dest" "$chosen_url" \
             || { err "Falló la descarga."; rm -f "$dest"; pause
                  banner; detect_system; menu_principal; return; }
