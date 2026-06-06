@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.0.0
+#  Versión:  2.1.0
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,10 +19,11 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
+readonly ISOS_CONF_URL="https://raw.githubusercontent.com/ricardomonla/rm-MULTIBOOT/main/isos.conf"
 
 readonly MULTIBOOT_LABEL="MULTIBOOT"
 readonly MULTIBOOT_MOUNT="/mnt/multiboot"
@@ -390,24 +391,60 @@ mount_multiboot() {
 
 
 # =============================================================================
-# DESCARGAR DESDE CATÁLOGO (isos.conf)
+# DESCARGAR DESDE CATÁLOGO (isos.conf leído desde GitHub)
 # =============================================================================
+
+# Obtiene el catálogo desde GitHub; si falla, intenta con el archivo local.
+fetch_catalog() {
+    local tmp; tmp=$(mktemp)
+
+    if command -v curl &>/dev/null; then
+        curl -fsSL --connect-timeout 8 "$ISOS_CONF_URL" -o "$tmp" 2>/dev/null
+    elif command -v wget &>/dev/null; then
+        wget -q --timeout=8 -O "$tmp" "$ISOS_CONF_URL" 2>/dev/null
+    fi
+
+    # Si el archivo descargado tiene contenido válido, lo usamos
+    if [[ -s "$tmp" ]] && grep -q '|' "$tmp" 2>/dev/null; then
+        echo "$tmp"
+        return 0
+    fi
+
+    rm -f "$tmp"
+
+    # Fallback: archivo local junto al script
+    if [[ -f "$ISOS_CONF" ]]; then
+        echo "$ISOS_CONF"
+        return 0
+    fi
+
+    return 1
+}
 
 download_from_catalog() {
     banner
     step "Descargar ISO desde el catálogo"
     echo ""
 
-    if [[ ! -f "$ISOS_CONF" ]]; then
-        err "No se encontró el archivo de catálogo: $ISOS_CONF"
-        echo -e "  Creá o copiá el archivo ${W}isos.conf${N} junto a este script.\n"
+    # Obtener catálogo
+    local catalog_src catalog_file origin_label
+    printf "  Cargando catálogo desde GitHub..."
+    if catalog_file=$(fetch_catalog); then
+        if [[ "$catalog_file" == "$ISOS_CONF" ]]; then
+            origin_label="${Y}(sin red — usando archivo local)${N}"
+        else
+            origin_label="${G}(GitHub — actualizado)${N}"
+        fi
+        printf "\r  ${G}✓${N}  Catálogo cargado %b\n\n" "$origin_label"
+    else
+        printf "\r  ${R}✗${N}  No se pudo obtener el catálogo.\n"
+        echo -e "  Verificá la conexión a internet o colocá ${W}isos.conf${N} junto al script.\n"
         pause; banner; detect_system; menu_principal; return
     fi
 
     # Leer entradas válidas del catálogo (ignorar comentarios y líneas vacías)
     local -a names urls
     while IFS='|' read -r name url; do
-        # Ignorar comentarios y vacías
         [[ "$name" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${name// }" ]]           && continue
         name="${name#"${name%%[! ]*}"}"; name="${name%"${name##*[! ]}"}"
@@ -415,11 +452,13 @@ download_from_catalog() {
         [[ -z "$url" ]] && continue
         names+=("$name")
         urls+=("$url")
-    done < "$ISOS_CONF"
+    done < "$catalog_file"
+
+    # Limpiar archivo temporal si vino de GitHub
+    [[ "$catalog_file" != "$ISOS_CONF" ]] && rm -f "$catalog_file"
 
     if [[ "${#names[@]}" -eq 0 ]]; then
         err "El catálogo está vacío o no tiene entradas válidas."
-        echo -e "  Revisá el archivo ${W}isos.conf${N}.\n"
         pause; banner; detect_system; menu_principal; return
     fi
 
