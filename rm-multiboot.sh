@@ -2,8 +2,8 @@
 # =============================================================================
 #  rm-multiboot.sh — Gestor de Multiboot desde disco interno
 # =============================================================================
-#  Autor:    Ricardo Monla
-#  Email:    ma_fp@yahoo.com.ar
+#  Autor:    Lic. Ricardo MONLA
+#  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
 #  Versión:  2.0.0
 #  Licencia: MIT
@@ -20,7 +20,7 @@ set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 readonly SCRIPT_VERSION="2.0.0"
-readonly SCRIPT_AUTHOR="Ricardo Monla"
+readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
 
