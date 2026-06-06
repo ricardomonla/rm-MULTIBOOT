@@ -3,7 +3,7 @@
 **Proyecto:** rm-MULTIBOOT  
 **Autor:** Lic. Ricardo MONLA  
 **Fecha de inicio:** 2026-06-06  
-**Estado general:** 🔲 En preparación
+**Estado general:** 🔄 En progreso
 
 ---
 
@@ -41,25 +41,26 @@ Fase 2 ──→ [Conclusión] ──→ Replanteo Fase 3
 
 ### FASE 1 — Preparación del entorno VirtualBox
 
-**Estado:** 🔲 Pendiente  
+**Estado:** 🔄 En progreso — pendiente instalación del SO en la VM  
 **Objetivo:** Tener una VM Linux operativa con disco configurado para simular
 un equipo real con espacio libre disponible para crear la partición MULTIBOOT.
 
-#### Especificaciones de la VM
+#### Especificaciones de la VM — valores reales aplicados
 
-| Parámetro | Valor sugerido |
-|---|---|
-| Nombre | rm-multiboot-test |
-| SO base | Debian 12 o Ubuntu 24.04 |
-| RAM | 2048 MB |
-| CPU | 2 núcleos |
-| Disco principal | 40 GB (deja ~20 GB sin particionar) |
-| Red | NAT (con acceso a internet para descargar ISOs) |
-| Modo firmware | BIOS Legacy primero, luego repetir en UEFI |
+| Parámetro | Valor planificado | Valor aplicado |
+|---|---|---|
+| Nombre | rm-multiboot-test | rm-multiboot-test ✓ |
+| SO base | Debian 12 o Ubuntu 24.04 | Debian 13.5.0 (versión actual) |
+| RAM | 2048 MB | 2048 MB ✓ |
+| CPU | 2 núcleos | 2 núcleos ✓ |
+| Disco principal | 40 GB | 40 GB dinámico VDI ✓ |
+| Red | NAT | NAT ✓ |
+| Modo firmware | BIOS Legacy | BIOS Legacy ✓ |
+| ISO instalación | Debian 12 netinstall | Debian 13.5.0 netinstall (755 MB) |
 
 #### Tareas
 
-- [ ] **1.1** Crear la VM en VirtualBox con las especificaciones indicadas
+- [x] **1.1** Crear la VM en VirtualBox con las especificaciones indicadas
 - [ ] **1.2** Instalar el SO base dejando al menos 15 GB sin asignar en el disco
 - [ ] **1.3** Verificar con `lsblk -f` que hay espacio libre sin particionar
 - [ ] **1.4** Instalar dependencias necesarias en la VM:
@@ -70,28 +71,42 @@ un equipo real con espacio libre disponible para crear la partición MULTIBOOT.
   ```bash
   curl -Is https://raw.githubusercontent.com | head -1
   ```
-- [ ] **1.6** Tomar snapshot de VirtualBox con nombre `00-base-limpia`
+- [x] **1.6** Tomar snapshot de VirtualBox con nombre `00-base-limpia`
 - [ ] **1.7** Clonar el repositorio dentro de la VM:
   ```bash
   git clone https://github.com/ricardomonla/rm-MULTIBOOT.git ~/rm-MULTIBOOT
   ```
 
 #### Notas de ejecución
-<!-- Completar durante la ejecución -->
 
 ```
-[ espacio para registrar lo que ocurrió, comandos ejecutados, salidas relevantes ]
+2026-06-06 — Ejecución automatizada con VBoxManage
+
+- VirtualBox 7.1.12 ya instalado en el host
+- VM "rm-multiboot-test" creada (UUID: 62cec506-d91a-4ab4-91c7-dbf6e6216e72)
+- Disco VDI 40 GB dinámico creado y conectado al controlador SATA
+- Controlador IDE agregado para DVD
+- ISO Debian 13.5.0 netinstall descargada (755 MB) y conectada al DVD
+- Snapshot "00-base-limpia" tomado antes de iniciar la instalación
+  (UUID snapshot: 7d07296a-707f-44b3-ada9-5eb9c42b1a69)
+
+HALLAZGO: La URL de Debian en isos.conf estaba desactualizada (12.9.0 → 13.5.0).
+Debian ya publicó la versión 13 (Trixie). Requiere actualizar isos.conf.
+
+PENDIENTE: Iniciar la VM en VirtualBox GUI e instalar Debian 13
+dejando ~20 GB sin particionar (tareas 1.2 a 1.7).
 ```
 
 #### Conclusión y hallazgos
-<!-- Completar al finalizar la fase — es el INPUT de la Fase 2 -->
+<!-- Se completa al cerrar la fase -->
 
 | # | Hallazgo | Impacto en fase siguiente |
 |---|---|---|
-| — | *(pendiente)* | — |
+| 1 | URLs de Debian en `isos.conf` desactualizadas (v12 → v13) | Actualizar catálogo antes de Fase 3 |
+| — | *(resto pendiente hasta completar instalación del SO)* | — |
 
 **¿Se ajusta el plan de la Fase 2?** 🔲 Sí / 🔲 No  
-**Ajustes realizados:** *(ninguno hasta completar esta fase)*
+**Ajustes realizados:** *(pendiente cierre de fase)*
 
 ---
 
