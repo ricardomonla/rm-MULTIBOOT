@@ -3,7 +3,7 @@
 **Proyecto:** rm-MULTIBOOT  
 **Autor:** Lic. Ricardo MONLA  
 **Fecha de inicio:** 2026-06-06  
-**Estado general:** 🔄 En progreso — Fase 1 completada, iniciando Fase 2
+**Estado general:** 🔄 En progreso — Fase 1 completada, Fase 2 en progreso (v2.6.0)
 
 ---
 
@@ -157,10 +157,10 @@ y maneja todos los escenarios de disco reales — incluyendo disco 100% particio
 
 | # | Escenario | Acción del script |
 |---|---|---|
-| 1 | Espacio libre sin particionar ≥ 10 GB | Crear partición directamente (ya implementado) |
-| 2 | Segundo disco disponible | Ofrecer crear MULTIBOOT en ese disco |
-| 3 | Solo espacio libre en filesystem raíz (no en partición) | Generar script de rescue + instrucciones para live CD |
-| 4 | Partición no raíz con espacio reutilizable | Redimensionar en caliente |
+| 1 | Espacio libre sin particionar ≥ 10 GB | Crear partición directamente |
+| 2 | Segundo disco virgen disponible | Crear MULTIBOOT en ese disco |
+| 3 | Partición no-raíz con filesystem con espacio libre | Redimensionar en caliente (stub pendiente) |
+| 4 | Solo espacio en filesystem raíz, disco 100% particionado | Instalar hook en initramfs para resize automático en el próximo boot — **sin Live CD** |
 
 #### Tareas
 
@@ -171,9 +171,9 @@ y maneja todos los escenarios de disco reales — incluyendo disco 100% particio
   - [x] Disco principal: **/dev/sda (40G)** ✓
   - [x] Espacio libre: **no encontrado** → error registrado en log ✓
 - [x] **2.3** Agregar sistema de log al script → `/var/log/rm-multiboot.log` (v2.4.0)
-- [ ] **2.4** Implementar motor de detección de espacio ampliado (Escenarios 1–4)
-- [ ] **2.5** Implementar Escenario 3: generar script de rescue para live CD cuando la raíz es la única candidata
-- [ ] **2.6** Probar el flujo completo en la VM via modo rescue (DVD Debian → rescue → script generado)
+- [x] **2.4** Implementar motor de detección de espacio ampliado (Escenarios 1–4) (v2.5.0)
+- [x] **2.5** Implementar Escenario 4: instalar hook de initramfs para resize automático sin Live CD (v2.6.0)
+- [ ] **2.6** Probar flujo del Escenario 4 en la VM: ejecutar rm-multiboot.sh → instalar hook → reiniciar → verificar resize automático vía initramfs
 - [ ] **2.7** Verificar resultado post-setup:
   ```bash
   lsblk -f
@@ -411,7 +411,9 @@ fallaron y documentar el estado final del script para uso en producción.
 | Fase | Versión del script | Cambios relevantes |
 |---|---|---|
 | Inicio | 2.3.2 | Versión inicial de pruebas |
-| — | — | — |
+| Fase 2 | 2.4.0 | Sistema de log en `/var/log/rm-multiboot.log` |
+| Fase 2 | 2.5.0 | Motor de detección de 4 escenarios de disco |
+| Fase 2 | 2.6.0 | Escenario 4: resize vía initramfs, sin Live CD |
 
 ---
 

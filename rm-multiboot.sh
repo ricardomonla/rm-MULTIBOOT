@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.3.2
+#  Versión:  2.6.0
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.5.0"
+readonly SCRIPT_VERSION="2.6.0"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -452,10 +452,9 @@ _wizard_resize_nonroot() {
     pause; setup_wizard
 }
 
-# Escenario 4: la única opción es reducir la raíz — generar script rescue
+# Escenario 4: reducir la raíz via initramfs — sin necesidad de Live CD
 _wizard_rescue_root() {
     local root_disk="$1" avail_gib="$2"
-    local rescue_script="/root/rm-multiboot-rescue.sh"
     local safety_margin=10
     local max_free=$(( avail_gib - safety_margin ))
 
@@ -468,8 +467,9 @@ _wizard_rescue_root() {
     echo ""
     echo -e "  ${Y}El disco no tiene espacio sin particionar.${N}"
     echo -e "  La partición raíz tiene ${W}${avail_gib} GB libres${N} que pueden redistribuirse.\n"
-    echo -e "  ${W}Solución:${N} rm-multiboot genera un script que se ejecuta desde un"
-    echo -e "  ${W}Live CD / modo rescue${N} para reducir la raíz y crear MULTIBOOT.\n"
+    echo -e "  ${W}Solución automática sin Live CD:${N} rm-multiboot instala un hook en el"
+    echo -e "  initramfs que reduce la raíz en el ${W}próximo arranque${N} del sistema,\n"
+    echo -e "  antes de que la partición raíz se monte. No se requiere ningún medio externo.\n"
 
     local recommended=$(( max_free > 50 ? 30 : max_free ))
     local size_gb
@@ -481,104 +481,219 @@ _wizard_rescue_root() {
         setup_wizard; return
     fi
 
-    step "Generando script de rescue..."
-
-    # Obtener datos del disco actual
-    local root_part root_part_num root_size_mib new_root_end_mib mb_start_mib mb_end_mib
+    # ── Calcular parámetros del resize ───────────────────────────────────────
+    local root_part root_part_num root_size_mib root_start_mib
     root_part=$(findmnt -n -o SOURCE / | head -1)
     root_part_num=$(parted -s "$root_disk" print 2>/dev/null \
-        | awk -v part="$root_part" '$0 ~ part {print $1}' | head -1)
+        | awk -v rp="$(basename "$root_part")" '$0 ~ rp {print $1; exit}')
     [[ -z "$root_part_num" ]] && root_part_num=$(echo "$root_part" | grep -o '[0-9]*$')
     root_size_mib=$(parted -s "$root_disk" unit MiB print 2>/dev/null \
         | awk -v n="$root_part_num" '$1==n {gsub(/MiB/,"",$3); print $3}')
-    local keep_mib=$(( root_size_mib - size_gb * 1024 ))
-    local root_start_mib
     root_start_mib=$(parted -s "$root_disk" unit MiB print 2>/dev/null \
         | awk -v n="$root_part_num" '$1==n {gsub(/MiB/,"",$2); print $2}')
-    new_root_end_mib=$(( root_start_mib + keep_mib ))
-    mb_start_mib="$new_root_end_mib"
-    mb_end_mib=$(( mb_start_mib + size_gb * 1024 ))
+    local keep_mib=$(( root_size_mib - size_gb * 1024 ))
+    # +1 MiB extra: parted alinea el final al sector anterior al límite especificado,
+    # lo que puede dejar la partición 1 MiB más chica que el filesystem reducido.
+    local new_root_end_mib=$(( root_start_mib + keep_mib + 1 ))
+    local mb_start_mib="$new_root_end_mib"
+    local mb_end_mib=$(( mb_start_mib + size_gb * 1024 ))
     local part_table
     part_table=$(parted -s "$root_disk" print 2>/dev/null | awk '/Partition Table/{print $3}')
 
-    cat > "$rescue_script" << RESCUE
-#!/bin/bash
-# =============================================================================
-#  rm-multiboot-rescue.sh — Script de redimensionamiento para modo rescue
-#  Generado por rm-multiboot.sh v${SCRIPT_VERSION} el $(date '+%Y-%m-%d %H:%M:%S')
-#  EJECUTAR DESDE LIVE CD O MODO RESCUE — NO ejecutar con el sistema montado
-# =============================================================================
-set -euo pipefail
-DISK="$root_disk"
-ROOT_PART="$root_part"
-ROOT_PART_NUM="$root_part_num"
-MB_LABEL="$MULTIBOOT_LABEL"
-MB_MOUNT="$MULTIBOOT_MOUNT"
-PART_TABLE="$part_table"
-KEEP_MIB=$keep_mib
-ROOT_START_MIB=$root_start_mib
-NEW_ROOT_END_MIB=$new_root_end_mib
-MB_START_MIB=$mb_start_mib
-MB_END_MIB=$mb_end_mib
-SIZE_GB=$size_gb
+    # ── Calcular número de la nueva partición MULTIBOOT ─────────────────────
+    local mb_part_num
+    if [[ "$part_table" == "msdos" ]]; then
+        local used_primary
+        used_primary=$(parted -s "$root_disk" print 2>/dev/null \
+            | awk '$1 ~ /^[1-4]$/ {print $1}' | sort -n)
+        for n in 1 2 3 4; do
+            if ! echo "$used_primary" | grep -qx "$n"; then
+                mb_part_num="$n"; break
+            fi
+        done
+        [[ -z "$mb_part_num" ]] && {
+            err "No hay ranuras de partición primaria libres en la tabla MBR."; pause; exit 1
+        }
+    else
+        local last_num
+        last_num=$(parted -s "$root_disk" print 2>/dev/null \
+            | awk '/^[[:space:]]*[0-9]/{print $1}' | sort -n | tail -1)
+        mb_part_num=$(( last_num + 1 ))
+    fi
 
-echo "=== rm-multiboot rescue script ==="
-echo "Disco: \$DISK | Raíz: \$ROOT_PART | MULTIBOOT: \${SIZE_GB} GB"
-echo ""
-echo "ADVERTENCIA: Esta operación modifica particiones."
-echo "Asegurate de tener un backup antes de continuar."
-read -rp "¿Continuar? [s/N]: " ans
-[[ "\${ans,,}" != "s" ]] && exit 0
+    local mb_dev_suffix
+    [[ "$root_disk" =~ nvme|mmcblk ]] && mb_dev_suffix="p${mb_part_num}" \
+                                       || mb_dev_suffix="${mb_part_num}"
+    local mb_dev="${root_disk}${mb_dev_suffix}"
 
-echo "[1/5] Verificando filesystem raíz..."
-e2fsck -f "\$ROOT_PART"
+    # ── Confirmar operación ──────────────────────────────────────────────────
+    echo ""
+    echo -e "  ${W}Resumen de la operación:${N}"
+    echo -e "    Disco:               $root_disk ($part_table)"
+    echo -e "    Partición raíz:      $root_part → $(( keep_mib / 1024 )) GB (era $(( root_size_mib / 1024 )) GB)"
+    echo -e "    Nueva partición:     $mb_dev → ${size_gb} GB (MULTIBOOT)"
+    echo -e "    Ejecución:           automática en el próximo arranque (vía initramfs)"
+    echo ""
+    echo -e "  ${Y}ADVERTENCIA:${N} Esta operación modifica la tabla de particiones."
+    echo -e "  Asegurate de tener un backup antes de continuar.\n"
 
-echo "[2/5] Reduciendo filesystem a \${KEEP_MIB} MiB..."
-resize2fs "\$ROOT_PART" "\${KEEP_MIB}M"
+    if ! confirm "¿Instalar el mecanismo de resize automático?"; then
+        echo ""; warn "Operación cancelada."; pause; exit 0
+    fi
 
-echo "[3/5] Reduciendo partición raíz..."
-if [[ "\$PART_TABLE" == "gpt" ]]; then
-    parted -s "\$DISK" resizepart "\$ROOT_PART_NUM" "\${NEW_ROOT_END_MIB}MiB"
-else
-    parted -s "\$DISK" resizepart "\$ROOT_PART_NUM" "\${NEW_ROOT_END_MIB}MiB"
+    # ── Hook: incluir herramientas en el initramfs ───────────────────────────
+    step "Instalando herramientas de particionado en el initramfs..."
+    mkdir -p /etc/initramfs-tools/hooks
+    cat > /etc/initramfs-tools/hooks/rm-multiboot-tools << 'HOOK'
+#!/bin/sh
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+for b in resize2fs parted mkfs.ext4 mke2fs e2fsck partprobe; do
+    for p in /sbin /usr/sbin /bin /usr/bin; do
+        [ -x "$p/$b" ] && { copy_exec "$p/$b" /sbin; break; }
+    done
+done
+HOOK
+    chmod +x /etc/initramfs-tools/hooks/rm-multiboot-tools
+    ok "Hook de herramientas instalado"
+
+    # ── Script local-premount: corre antes de montar la raíz ─────────────────
+    step "Instalando script de resize en local-premount..."
+    mkdir -p /etc/initramfs-tools/scripts/local-premount
+    cat > /etc/initramfs-tools/scripts/local-premount/rm-multiboot-resize << INITSCRIPT
+#!/bin/sh
+PREREQ=""
+prereqs() { echo "\$PREREQ"; }
+case \$1 in prereqs) prereqs; exit 0;; esac
+
+. /scripts/functions
+
+RM_DISK="${root_disk}"
+RM_ROOT_PART="${root_part}"
+RM_ROOT_PART_NUM=${root_part_num}
+RM_KEEP_MIB=${keep_mib}
+RM_NEW_ROOT_END_MIB=${new_root_end_mib}
+RM_MB_START_MIB=${mb_start_mib}
+RM_MB_END_MIB=${mb_end_mib}
+RM_MB_DEV="${mb_dev}"
+RM_MB_LABEL="${MULTIBOOT_LABEL}"
+RM_PART_TABLE="${part_table}"
+
+echo "rm-multiboot: local-premount iniciado" > /dev/kmsg 2>/dev/null || true
+
+# Esperar que el dispositivo esté disponible (local-premount corre antes de wait_for_root)
+_w=0
+while [ \$_w -lt 30 ] && [ ! -b "\${RM_ROOT_PART}" ]; do
+    sleep 1; _w=\$((\$_w + 1))
+done
+if [ ! -b "\${RM_ROOT_PART}" ]; then
+    echo "rm-multiboot: timeout esperando dispositivo, abortando" > /dev/kmsg 2>/dev/null || true
+    exit 0
 fi
 
-echo "[4/5] Creando partición MULTIBOOT..."
-if [[ "\$PART_TABLE" == "gpt" ]]; then
-    parted -s "\$DISK" mkpart "\$MB_LABEL" ext4 "\${MB_START_MIB}MiB" "\${MB_END_MIB}MiB"
-else
-    parted -s "\$DISK" mkpart primary ext4 "\${MB_START_MIB}MiB" "\${MB_END_MIB}MiB"
+# Idempotente: si MULTIBOOT ya existe, sin accion
+if [ -b "\${RM_MB_DEV}" ]; then
+    echo "rm-multiboot: MULTIBOOT ya existe, sin accion" > /dev/kmsg 2>/dev/null || true
+    exit 0
 fi
-partprobe "\$DISK" 2>/dev/null || true; sleep 2
 
-MB_DEV=\$(lsblk -lno NAME "\$DISK" | grep -v "^\$(basename \$DISK)\$" | sort | tail -1)
-MB_DEV="/dev/\$MB_DEV"
+echo "rm-multiboot: iniciando resize" > /dev/kmsg 2>/dev/null || true
+log_begin_msg "rm-multiboot: reduciendo raiz y creando MULTIBOOT (${size_gb} GB)"
 
-echo "[5/5] Formateando \$MB_DEV como ext4 con etiqueta \$MB_LABEL..."
-mkfs.ext4 -L "\$MB_LABEL" "\$MB_DEV"
+/sbin/e2fsck -f -y "\${RM_ROOT_PART}" || true
+/sbin/resize2fs "\${RM_ROOT_PART}" "\${RM_KEEP_MIB}M" || true
 
-echo ""
-echo "=== Listo. Reiniciá el sistema normalmente y ejecutá rm-multiboot.sh ==="
-RESCUE
+# parted ---pretend-input-tty acepta los warnings interactivos de "particion en uso"
+# resizepart y mkpart usan ---pretend-input-tty para responder interactivamente
+# "Yes\nYes\n": acepta "partition in use" + "shrink may cause data loss"
+printf "Yes\nYes\n" | /sbin/parted ---pretend-input-tty "\${RM_DISK}" resizepart "\${RM_ROOT_PART_NUM}" "\${RM_NEW_ROOT_END_MIB}MiB" 2>&1 || true
+# "Yes\n": acepta "closest location we can manage" cuando hay partición extendida adyacente
+if [ "\${RM_PART_TABLE}" = "gpt" ]; then
+    printf "Yes\n" | /sbin/parted ---pretend-input-tty "\${RM_DISK}" mkpart "MULTIBOOT" ext4 "\${RM_MB_START_MIB}MiB" "\${RM_MB_END_MIB}MiB" 2>&1 || true
+else
+    printf "Yes\n" | /sbin/parted ---pretend-input-tty "\${RM_DISK}" mkpart primary ext4 "\${RM_MB_START_MIB}MiB" "\${RM_MB_END_MIB}MiB" 2>&1 || true
+fi
+/sbin/partprobe "\${RM_DISK}" 2>/dev/null || true
+sleep 2
+if [ -b "\${RM_MB_DEV}" ]; then
+    if [ -x /sbin/mkfs.ext4 ]; then
+        /sbin/mkfs.ext4 -L "\${RM_MB_LABEL}" "\${RM_MB_DEV}" 2>&1 || true
+    else
+        /sbin/mke2fs -t ext4 -L "\${RM_MB_LABEL}" "\${RM_MB_DEV}" 2>&1 || true
+    fi
+else
+    echo "rm-multiboot: ERROR \${RM_MB_DEV} no aparecio despues de mkpart" > /dev/kmsg 2>/dev/null || true
+fi
 
-    chmod +x "$rescue_script"
-    ok "Script generado: ${W}$rescue_script${N}"
-    log_info "Script rescue generado: $rescue_script (${size_gb} GB para MULTIBOOT)"
+# Marcar para cleanup en local-bottom (donde rootmnt ya está disponible)
+echo "done" > /run/rm-multiboot-resize-done 2>/dev/null || true
+
+echo "rm-multiboot: resize completado" > /dev/kmsg 2>/dev/null || true
+log_end_msg 0
+INITSCRIPT
+    chmod +x /etc/initramfs-tools/scripts/local-premount/rm-multiboot-resize
+    ok "Script de resize instalado en local-premount"
+
+    # ── Script local-bottom: limpia hooks una vez que la raíz está montada ────
+    step "Instalando script de cleanup en local-bottom..."
+    mkdir -p /etc/initramfs-tools/scripts/local-bottom
+    cat > /etc/initramfs-tools/scripts/local-bottom/rm-multiboot-cleanup << 'CLEANUP'
+#!/bin/sh
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case $1 in prereqs) prereqs; exit 0;; esac
+
+[ -f /run/rm-multiboot-resize-done ] || exit 0
+echo "rm-multiboot: cleanup rootmnt=[${rootmnt}]" > /dev/kmsg 2>/dev/null || true
+TARGET="${rootmnt:-/root}"
+rm -f "${TARGET}/.rm-multiboot-resize" 2>/dev/null || true
+rm -f "${TARGET}/etc/initramfs-tools/scripts/local-premount/rm-multiboot-resize" 2>/dev/null || true
+rm -f "${TARGET}/etc/initramfs-tools/scripts/local-bottom/rm-multiboot-cleanup" 2>/dev/null || true
+rm -f "${TARGET}/etc/initramfs-tools/hooks/rm-multiboot-tools" 2>/dev/null || true
+rm -f /run/rm-multiboot-resize-done 2>/dev/null || true
+echo "rm-multiboot: cleanup completado" > /dev/kmsg 2>/dev/null || true
+CLEANUP
+    chmod +x /etc/initramfs-tools/scripts/local-bottom/rm-multiboot-cleanup
+    ok "Script de cleanup instalado en local-bottom"
+
+    # ── Flag de activación (ya no se usa para el trigger, solo como referencia) ──
+    touch /.rm-multiboot-resize
+    ok "Flag de activación creado: /.rm-multiboot-resize"
+
+    # ── Regenerar initramfs ──────────────────────────────────────────────────
+    step "Regenerando initramfs..."
+    if update-initramfs -u 2>/dev/null; then
+        ok "initramfs regenerado con herramientas de resize"
+    else
+        err "No se pudo regenerar el initramfs"
+        rm -f /.rm-multiboot-resize \
+              /etc/initramfs-tools/hooks/rm-multiboot-tools \
+              /etc/initramfs-tools/scripts/local-premount/rm-multiboot-resize
+        pause; exit 1
+    fi
+
+    log_info "Initramfs resize instalado: disco=$root_disk root=$root_part mb=$mb_dev size=${size_gb}GB"
 
     divider
-    echo -e "  ${W}Próximos pasos para completar la instalación:${N}\n"
-    echo -e "  ${C}1)${N}  Reiniciá desde un ${W}Live CD${N} (cualquier distro Linux)"
-    echo -e "       o desde el ${W}modo rescue${N} del instalador de Debian/Ubuntu\n"
-    echo -e "  ${C}2)${N}  Montá la partición raíz y copiá el script:"
-    echo -e "       ${W}mount $root_part /mnt${N}"
-    echo -e "       ${W}cp /mnt/root/rm-multiboot-rescue.sh /tmp/${N}\n"
-    echo -e "  ${C}3)${N}  Ejecutá el script de rescue:"
-    echo -e "       ${W}bash /tmp/rm-multiboot-rescue.sh${N}\n"
-    echo -e "  ${C}4)${N}  Reiniciá en modo normal y volvé a ejecutar:"
-    echo -e "       ${W}sudo ./rm-multiboot.sh${N}\n"
-    echo -e "  El script generado está en: ${W}$rescue_script${N}"
-    log_step "Fin setup wizard — pendiente rescue"
-    pause
+    echo -e "  ${W}${G}¡Listo! El resize está programado para el próximo arranque.${N}\n"
+    echo -e "  En el próximo boot el initramfs ejecutará automáticamente:"
+    echo -e "    ${C}1)${N} e2fsck + resize2fs (reduce $root_part de $(( root_size_mib / 1024 )) → $(( keep_mib / 1024 )) GB)"
+    echo -e "    ${C}2)${N} parted (ajusta tabla de particiones)"
+    echo -e "    ${C}3)${N} mkfs.ext4 (formatea $mb_dev como MULTIBOOT)\n"
+    echo -e "  Luego el hook se auto-elimina. Después del reinicio ejecutá:"
+    echo -e "    ${W}sudo ./rm-multiboot.sh${N}\n"
+
+    log_step "Fin setup wizard — pendiente reinicio para resize via initramfs"
+
+    if confirm "¿Reiniciar ahora?"; then
+        log_info "Reiniciando para ejecutar resize via initramfs"
+        reboot
+    else
+        echo ""; warn "Acordate de reiniciar para que se ejecute el resize."; echo ""
+        pause
+    fi
 }
 
 _wizard_format_and_mount() {
