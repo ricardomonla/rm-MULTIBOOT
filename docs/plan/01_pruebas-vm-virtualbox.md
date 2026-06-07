@@ -3,7 +3,7 @@
 **Proyecto:** rm-MULTIBOOT  
 **Autor:** Lic. Ricardo MONLA  
 **Fecha de inicio:** 2026-06-06  
-**Estado general:** 🔄 En progreso — Fase 1 completada, Fase 2 en progreso (v2.6.0)
+**Estado general:** 🔄 En progreso — Fase 1 completada, Fase 2 en progreso (v2.7.0)
 
 ---
 
@@ -173,15 +173,15 @@ y maneja todos los escenarios de disco reales — incluyendo disco 100% particio
 - [x] **2.3** Agregar sistema de log al script → `/var/log/rm-multiboot.log` (v2.4.0)
 - [x] **2.4** Implementar motor de detección de espacio ampliado (Escenarios 1–4) (v2.5.0)
 - [x] **2.5** Implementar Escenario 4: instalar hook de initramfs para resize automático sin Live CD (v2.6.0)
-- [ ] **2.6** Probar flujo del Escenario 4 en la VM: ejecutar rm-multiboot.sh → instalar hook → reiniciar → verificar resize automático vía initramfs
-- [ ] **2.7** Verificar resultado post-setup:
+- [x] **2.6** Probar flujo del Escenario 4 en la VM: ejecutar rm-multiboot.sh → instalar hook → reiniciar → verificar resize automático vía initramfs
+- [x] **2.7** Verificar resultado post-setup:
   ```bash
   lsblk -f
   grep MULTIBOOT /etc/fstab
   ls /mnt/multiboot/
   cat /etc/grub.d/41_multiboot
   ```
-- [ ] **2.8** Verificar que GRUB fue actualizado sin errores:
+- [x] **2.8** Verificar que GRUB fue actualizado sin errores:
   ```bash
   grep -i multiboot /boot/grub/grub.cfg
   ```
@@ -207,7 +207,36 @@ La detección del sistema funciona perfectamente.
 El error de espacio libre es correcto — el disco está 100% particionado.
 El mensaje al usuario es claro pero la acción siguiente no está implementada en el script.
 
-PENDIENTE: Implementar en el script la estrategia para disco sin espacio libre.
+--- Implementación motor de espacio (v2.4.0 → v2.5.0) ---
+- Sistema de log en /var/log/rm-multiboot.log
+- Motor de 4 escenarios: libre sin particionar / disco virgen / partición no-raíz / raíz
+
+--- Escenario 4 vía initramfs (v2.6.0) ---
+- El script instaló hooks en /etc/initramfs-tools/ + regeneró el initramfs
+- Al reiniciar, el initramfs ejecutó: e2fsck + resize2fs + parted + mkfs.ext4
+- Problemas encontrados y resueltos durante la prueba:
+  * /tmp no existe en el initramfs de Debian 13 → usar /run/
+  * local-premount corre antes de wait_for_root: dispositivo no disponible → loop de espera 30s
+  * parted -s falla con "partition in use" → usar printf "Yes\n" | parted ---pretend-input-tty
+  * Descalce de 1 MiB entre filesystem y partición (parted alinea antes del límite) → +1 MiB extra
+  * mkfs.ext4: applet not found en busybox → usar mke2fs -t ext4 como fallback
+  * mkpart falla por partición extendida adyacente → printf "Yes\n" para aceptar "closest location"
+  * Cleanup del local-bottom no borró los archivos (path rootmnt no funcionó como esperado)
+
+--- Estado post-Escenario 4 (verificado con SSH) ---
+  lsblk -f:
+    sda1 ext4 23552MiB 20G free /
+    sda2 (extendida)
+    sda3 ext4 LABEL=MULTIBOOT UUID=8b8a9497 13.9G free /mnt/multiboot
+    sda5 swap
+  /etc/fstab: UUID=8b8a9497... /mnt/multiboot ext4 defaults,noatime 0 2 ✓
+  /etc/grub.d/41_multiboot: instalado y ejecutable ✓
+  /boot/grub/grub.cfg: ### BEGIN/END /etc/grub.d/41_multiboot ### ✓
+  /mnt/multiboot/isos/ y grub/entries/ creados ✓
+
+--- Arreglos posteriores (v2.7.0) ---
+- _complete_setup_if_needed(): completa fstab + grub hook post-reboot + limpia hooks residuales
+- local-bottom cleanup mejorado: busca mountpoint correcto, agrega logging detallado
 ```
 
 #### Conclusión y hallazgos
@@ -414,6 +443,7 @@ fallaron y documentar el estado final del script para uso en producción.
 | Fase 2 | 2.4.0 | Sistema de log en `/var/log/rm-multiboot.log` |
 | Fase 2 | 2.5.0 | Motor de detección de 4 escenarios de disco |
 | Fase 2 | 2.6.0 | Escenario 4: resize vía initramfs, sin Live CD |
+| Fase 2 | 2.7.0 | `_complete_setup_if_needed()` + cleanup robusto del local-bottom |
 
 ---
 
