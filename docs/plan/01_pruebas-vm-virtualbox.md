@@ -3,7 +3,7 @@
 **Proyecto:** rm-MULTIBOOT  
 **Autor:** Lic. Ricardo MONLA  
 **Fecha de inicio:** 2026-06-06  
-**Estado general:** 🔄 En progreso — Fase 1 completada, Fase 2 en progreso (v2.7.0)
+**Estado general:** 🔄 En progreso — Fases 1 y 2 completadas, Fase 3 pendiente (v2.7.0)
 
 ---
 
@@ -145,7 +145,7 @@ HALLAZGO: Disco 100% particionado — el script debe manejar este escenario real
 
 ### FASE 2 — Ejecución del setup inicial
 
-**Estado:** 🔄 En progreso  
+**Estado:** ✅ Completada  
 **Prerequisito:** Fase 1 completada y hallazgos revisados.  
 **Objetivo:** Verificar que el wizard de setup detecta correctamente el sistema
 y maneja todos los escenarios de disco reales — incluyendo disco 100% particionado.
@@ -185,7 +185,7 @@ y maneja todos los escenarios de disco reales — incluyendo disco 100% particio
   ```bash
   grep -i multiboot /boot/grub/grub.cfg
   ```
-- [ ] **2.9** Tomar snapshot: `01-post-setup`
+- [x] **2.9** Tomar snapshot: `01-post-setup` (UUID: 43d76b0d-7d27-43cf-912f-bd1542740d4c)
 
 #### Notas de ejecución
 
@@ -247,8 +247,8 @@ El mensaje al usuario es claro pero la acción siguiente no está implementada e
 | 2 | La detección del sistema (BIOS/UEFI, OS, disco) funciona correctamente en la VM | Sin impacto negativo |
 | 3 | El script no tiene sistema de log — toda la información se pierde al cerrar | Agregar log a `/var/log/rm-multiboot.log` en la próxima versión del script |
 
-**¿Se ajusta el plan de la Fase 3?** 🔲 Sí / 🔲 No  
-**Ajustes realizados:** *(pendiente cierre de fase)*
+**¿Se ajusta el plan de la Fase 3?** ✅ Sí  
+**Ajustes realizados:** Actualizar isos.conf (URLs Debian v12 → v13) antes de ejecutar la Fase 3. El catálogo en GitHub usa la URL de descarga de Debian 13.5.0 que ya fue verificada.
 
 ---
 
@@ -450,7 +450,7 @@ fallaron y documentar el estado final del script para uso en producción.
 ## Checklist general de avance
 
 - [x] Fase 1 — Entorno VirtualBox preparado
-- [ ] Fase 2 — Setup inicial validado
+- [x] Fase 2 — Setup inicial validado
 - [ ] Fase 3 — Descargas y catálogo validados
 - [ ] Fase 4 — Arranque GRUB validado
 - [ ] Fase 5 — Casos borde validados
