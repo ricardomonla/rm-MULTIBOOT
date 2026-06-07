@@ -5,7 +5,7 @@
 #  Autor:    Lic. Ricardo MONLA
 #  Email:    rmonla@gmail.com
 #  GitHub:   https://github.com/ricardomonla/rm-MULTIBOOT
-#  Versión:  2.6.0
+#  Versión:  2.7.0
 #  Licencia: MIT
 #
 #  Uso: sudo ./rm-multiboot.sh
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.6.0"
+readonly SCRIPT_VERSION="2.7.0"
 readonly SCRIPT_AUTHOR="Lic. Ricardo MONLA"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISOS_CONF="$SCRIPT_DIR/isos.conf"
@@ -143,6 +143,57 @@ detect_system() {
 
 
 # =============================================================================
+# COMPLETAR SETUP SI MULTIBOOT EXISTE SIN CONFIGURACIÓN
+# =============================================================================
+
+# Llamada desde menu_principal cuando MULTIBOOT_READY=true.
+# Verifica y completa fstab, grub hook y limpia residuos del initramfs.
+_complete_setup_if_needed() {
+    local mb_uuid
+    mb_uuid=$(lsblk -no UUID "$MULTIBOOT_DEV" | head -1)
+
+    local needs_grub_update=false
+
+    if ! grep -q "$mb_uuid" /etc/fstab 2>/dev/null; then
+        step "Completando setup: agregando MULTIBOOT a /etc/fstab..."
+        printf '\n# Partición MULTIBOOT — rm-MULTIBOOT\nUUID=%s  %s  ext4  defaults,noatime  0  2\n' \
+            "$mb_uuid" "$MULTIBOOT_MOUNT" >> /etc/fstab
+        ok "Agregado a /etc/fstab (montaje automático)"
+        needs_grub_update=true
+    fi
+
+    if [[ ! -x "$GRUB_HOOK" ]]; then
+        step "Completando setup: instalando hook de GRUB..."
+        install_grub_hook "$mb_uuid"
+        needs_grub_update=true
+    fi
+
+    # Limpiar hooks residuales del initramfs cuando el cleanup del local-bottom falló
+    local initramfs_dirty=false
+    local f
+    for f in /.rm-multiboot-resize \
+              /etc/initramfs-tools/hooks/rm-multiboot-tools \
+              /etc/initramfs-tools/scripts/local-premount/rm-multiboot-resize \
+              /etc/initramfs-tools/scripts/local-bottom/rm-multiboot-cleanup; do
+        if [[ -e "$f" ]]; then
+            rm -f "$f"
+            initramfs_dirty=true
+        fi
+    done
+    if [[ "$initramfs_dirty" == true ]]; then
+        step "Limpiando hooks residuales del initramfs..."
+        update-initramfs -u -k all 2>/dev/null && ok "initramfs regenerado" \
+            || warn "No se pudo regenerar el initramfs — revisá manualmente"
+    fi
+
+    if [[ "$needs_grub_update" == true ]]; then
+        step "Actualizando GRUB..."
+        grub_update
+    fi
+}
+
+
+# =============================================================================
 # MENÚ PRINCIPAL
 # =============================================================================
 
@@ -164,6 +215,7 @@ menu_principal() {
         esac
     else
         mount_multiboot
+        _complete_setup_if_needed
         local iso_count
         iso_count=$(find "$ISO_DIR" -maxdepth 2 -name "*.iso" 2>/dev/null | wc -l)
         [[ "$iso_count" -gt 0 ]] && show_iso_mini_list \
@@ -644,14 +696,28 @@ INITSCRIPT
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case $1 in prereqs) prereqs; exit 0;; esac
+. /scripts/functions
 
 [ -f /run/rm-multiboot-resize-done ] || exit 0
-echo "rm-multiboot: cleanup rootmnt=[${rootmnt}]" > /dev/kmsg 2>/dev/null || true
+
+# rootmnt viene del entorno de initramfs-tools (normalmente /root)
 TARGET="${rootmnt:-/root}"
-rm -f "${TARGET}/.rm-multiboot-resize" 2>/dev/null || true
+echo "rm-multiboot: cleanup TARGET=[${TARGET}]" > /dev/kmsg 2>/dev/null || true
+
+# Verificar que TARGET sea un punto de montaje real antes de borrar
+if ! mountpoint -q "${TARGET}" 2>/dev/null; then
+    echo "rm-multiboot: WARN TARGET no es mountpoint, buscando alternativa" > /dev/kmsg 2>/dev/null || true
+    for T in /root /sysroot /mnt/root; do
+        mountpoint -q "${T}" 2>/dev/null && { TARGET="${T}"; break; }
+    done
+fi
+
+echo "rm-multiboot: cleanup TARGET final=[${TARGET}]" > /dev/kmsg 2>/dev/null || true
+rm -f "${TARGET}/.rm-multiboot-resize" 2>/dev/null && \
+    echo "rm-multiboot: borrado .rm-multiboot-resize" > /dev/kmsg 2>/dev/null || true
+rm -f "${TARGET}/etc/initramfs-tools/hooks/rm-multiboot-tools" 2>/dev/null || true
 rm -f "${TARGET}/etc/initramfs-tools/scripts/local-premount/rm-multiboot-resize" 2>/dev/null || true
 rm -f "${TARGET}/etc/initramfs-tools/scripts/local-bottom/rm-multiboot-cleanup" 2>/dev/null || true
-rm -f "${TARGET}/etc/initramfs-tools/hooks/rm-multiboot-tools" 2>/dev/null || true
 rm -f /run/rm-multiboot-resize-done 2>/dev/null || true
 echo "rm-multiboot: cleanup completado" > /dev/kmsg 2>/dev/null || true
 CLEANUP
